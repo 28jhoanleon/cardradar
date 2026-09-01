@@ -148,126 +148,83 @@ def _k(x):
     return str(x).lower().replace(" ", "").replace("_", "")
 
 
-CLAVES_AMARILLA = ("yellowcards", "yellowcard", "cardsyellow")
-CLAVES_ROJA = ("redcards", "redcard", "cardsred")
-CLAVES_2AMARILLA = ("secondyellowcard", "yellowredcard", "yellowred")
-
-
-def _buscar_par_stat(nodo, claves, prof=0):
-    if prof > 6 or not isinstance(nodo, (dict, list)):
-        return None
-    if isinstance(nodo, dict):
-        for k, v in nodo.items():
-            if _k(k) in claves:
-                if isinstance(v, list) and len(v) == 2:
-                    return num(v[0]), num(v[1])
-                if isinstance(v, dict) and "home" in v and "away" in v:
-                    return num(v["home"]), num(v["away"])
-                if isinstance(v, dict) and "stats" in v:
-                    st = v["stats"]
-                    if isinstance(st, list) and len(st) == 2:
-                        return num(st[0]), num(st[1])
-        for v in nodo.values():
-            r = _buscar_par_stat(v, claves, prof + 1)
-            if r is not None:
-                return r
-    else:
-        for v in nodo[:60]:
-            r = _buscar_par_stat(v, claves, prof + 1)
-            if r is not None:
-                return r
-    return None
-
-
-def _buscar_eventos_tarjetas(data, home_name, away_name):
-    amarillas = {"home": 0, "away": 0}
-    rojas = {"home": 0, "away": 0}
-    segundas = {"home": 0, "away": 0}
-    referee = [None]
-
-    def lado_de(ev):
-        if "isHome" in ev:
-            return "home" if ev["isHome"] else "away"
-        tn = ev.get("teamName") or dig(ev, "team", "name")
-        if isinstance(tn, str):
-            if _k(tn) == _k(home_name):
-                return "home"
-            if _k(tn) == _k(away_name):
-                return "away"
-        return None
-
+def buscar_referee(data, prof_max=8):
+    """Busca recursivamente una clave tipo 'referee' en el JSON."""
     def walk(n, prof=0):
-        if prof > 10:
-            return
+        if prof > prof_max:
+            return None
         if isinstance(n, dict):
-            if referee[0] is None:
-                for rk in ("referee", "refereeName"):
-                    rv = n.get(rk)
-                    if isinstance(rv, str) and rv.strip():
-                        referee[0] = rv.strip()
-                    elif isinstance(rv, dict):
-                        nm = rv.get("name") or rv.get("fullName")
+            for k, v in n.items():
+                if _k(k) in ("referee", "refereename"):
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+                    if isinstance(v, dict):
+                        nm = v.get("name") or v.get("fullName")
                         if isinstance(nm, str) and nm.strip():
-                            referee[0] = nm.strip()
-            tipo = ""
-            for tk in ("type", "cardType", "eventType"):
-                tv = n.get(tk)
-                if isinstance(tv, str):
-                    tipo = _k(tv)
-                    break
-            if tipo:
-                lado = lado_de(n)
-                if lado:
-                    if "red" in tipo and "yellow" in tipo:
-                        segundas[lado] += 1
-                        rojas[lado] += 1
-                    elif "red" in tipo:
-                        rojas[lado] += 1
-                    elif "yellow" in tipo and "card" in tipo:
-                        amarillas[lado] += 1
-                    elif tipo == "yellowcard":
-                        amarillas[lado] += 1
+                            return nm.strip()
             for v in n.values():
-                walk(v, prof + 1)
+                r = walk(v, prof + 1)
+                if r:
+                    return r
         elif isinstance(n, list):
             for v in n:
-                walk(v, prof + 1)
-
-    walk(data)
-    return amarillas, rojas, segundas, referee[0]
+                r = walk(v, prof + 1)
+                if r:
+                    return r
+        return None
+    return walk(data)
 
 
 def parse_cards(data, match_id, league_id, date, home, away):
-    ah = aw = rh = rw = None
-    sh = sw = 0
-    par_am = _buscar_par_stat(data, CLAVES_AMARILLA)
-    par_ro = _buscar_par_stat(data, CLAVES_ROJA)
-    fuente = "stats"
-    if par_am is None:
-        am_ev, ro_ev, seg_ev, referee = _buscar_eventos_tarjetas(data, home, away)
-        ah, aw = am_ev["home"], am_ev["away"]
-        rh, rw = ro_ev["home"], ro_ev["away"]
-        sh, sw = seg_ev["home"], seg_ev["away"]
-        fuente = "eventos"
-    else:
-        ah, aw = par_am
-        rh, rw = par_ro if par_ro else (0, 0)
-        _, _, _, referee = _buscar_eventos_tarjetas(data, home, away)
+    """Devuelve dos filas (home, away) con tarjetas + arbitro, o [] si no
+    se pudo extraer nada (partido queda marcado con error para revisar)."""
+    red_h = dig(data, "header", "status", "numberOfHomeRedCards")
+    red_w = dig(data, "header", "status", "numberOfAwayRedCards")
+    eventos = dig(data, "content", "matchFacts", "events", "events") or []
 
-    if ah is None and aw is None:
+    if red_h is None and red_w is None and not eventos:
         return []
 
-    total_h = (ah or 0) * 1 + (rh or 0) * 2
-    total_w = (aw or 0) * 1 + (rw or 0) * 2
+    yellow_h = yellow_w = 0
+    segunda_h = segunda_w = 0
+    for ev in eventos:
+        if not isinstance(ev, dict):
+            continue
+        card = _k(ev.get("card") or "")
+        is_home = ev.get("isHome")
+        if card == "yellow":
+            if is_home:
+                yellow_h += 1
+            elif is_home is False:
+                yellow_w += 1
+        elif card == "yellowred":
+            if is_home:
+                segunda_h += 1
+            elif is_home is False:
+                segunda_w += 1
+
+    if red_h is None or red_w is None:
+        rojas_directas_h = sum(1 for e in eventos if isinstance(e, dict)
+                               and _k(e.get("card") or "") == "red" and e.get("isHome"))
+        rojas_directas_w = sum(1 for e in eventos if isinstance(e, dict)
+                               and _k(e.get("card") or "") == "red" and e.get("isHome") is False)
+        red_h = (red_h if red_h is not None else rojas_directas_h + segunda_h)
+        red_w = (red_w if red_w is not None else rojas_directas_w + segunda_w)
+
+    referee = buscar_referee(data)
+    fuente = "eventos+status"
+
+    total_h = yellow_h * 1 + red_h * 2
+    total_w = yellow_w * 1 + red_w * 2
 
     return [
         {"team": home, "opponent": away, "is_home": 1,
-         "yellow": int(ah or 0), "red": int(rh or 0),
-         "second_yellow": int(sh), "total_cards": total_h,
+         "yellow": int(yellow_h), "red": int(red_h),
+         "second_yellow": int(segunda_h), "total_cards": total_h,
          "referee": referee, "fuente": fuente},
         {"team": away, "opponent": home, "is_home": 0,
-         "yellow": int(aw or 0), "red": int(rw or 0),
-         "second_yellow": int(sw), "total_cards": total_w,
+         "yellow": int(yellow_w), "red": int(red_w),
+         "second_yellow": int(segunda_w), "total_cards": total_w,
          "referee": referee, "fuente": fuente},
     ]
 
@@ -398,10 +355,20 @@ def main():
     ap.add_argument("--fixtures", action="store_true")
     ap.add_argument("--procesar", action="store_true")
     ap.add_argument("--inspeccionar", type=int, metavar="MATCH_ID")
+    ap.add_argument("--reset-tarjetas", action="store_true")
     ap.add_argument("--dias", type=int, default=180)
     a = ap.parse_args()
     db_init()
 
+    if a.reset_tarjetas:
+        with cx() as c:
+            n = c.execute("SELECT COUNT(*) FROM team_cards").fetchone()[0]
+            c.execute("DELETE FROM team_cards")
+            c.execute("UPDATE matches SET processed=0, error=NULL")
+        print(f"Borradas {n} filas de team_cards. Todos los partidos "
+              f"quedaron marcados para reprocesar.\nCorre ahora: "
+              f"python cards_data.py --procesar")
+        return
     if a.inspeccionar:
         out = inspeccionar(a.inspeccionar)
         print(json.dumps(out, ensure_ascii=False, indent=2)[:6000])
