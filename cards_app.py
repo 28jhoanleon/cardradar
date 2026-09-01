@@ -225,9 +225,14 @@ async def r_stats(request):
     return JSONResponse({"partidos": n_m, "filas_tarjetas": n_tc})
 
 
-async def _on_startup():
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app):
     db_init()
     threading.Thread(target=loop_actualizacion, daemon=True).start()
+    yield
 
 
 app = Starlette(
@@ -236,7 +241,7 @@ app = Starlette(
         Route("/api/proximos", r_proximos),
         Route("/api/stats", r_stats),
     ],
-    on_startup=[_on_startup],
+    lifespan=lifespan,
 )
 
 
