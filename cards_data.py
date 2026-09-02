@@ -170,24 +170,6 @@ def _k(x):
 
 
 # ======================= EXTRACTOR DE TARJETAS ==========================
-# Dos estrategias, igual de espiritu que el extractor generico de remates:
-#   1) Barra de stats del partido: busca un par [home, away] bajo una
-#      clave tipo "Yellow cards" / "Red cards".
-#   2) Lista de eventos del partido: cuenta tarjetas evento por evento y
-#      las asigna a home/away. Mas confiable si (1) no aparece.
-# Si ninguna de las dos anda, --inspeccionar te muestra la estructura
-# real para que la ajustemos.
-
-# Confirmado contra un partido real (Defensa y Justicia vs Platense,
-# match_id 5115967):
-#   - Los ROJOS totales por equipo (directos + por doble amarilla) estan
-#     en header.status.numberOfHomeRedCards / numberOfAwayRedCards.
-#     Es el dato mas confiable posible: lo calcula FotMob mismo.
-#   - Los eventos de tarjeta (una fila por tarjeta) estan en
-#     content.matchFacts.events.events, cada uno con "isHome": bool y
-#     "card": "Yellow" | "Red" | "YellowRed". Contamos "Yellow" ahi para
-#     las amarillas puras (las YellowRed ya se cuentan como rojo arriba).
-
 
 def buscar_referee(data, prof_max=8):
     """Busca recursivamente una clave tipo 'referee' en el JSON."""
@@ -214,6 +196,42 @@ def buscar_referee(data, prof_max=8):
                     return r
         return None
     return walk(data)
+
+
+# ======================= RESPALDO SOFASCORE ============================
+# Si FotMob no devuelve el árbitro, buscamos en Sofascore.
+# Para eso hacemos dos llamadas: primero localizamos el id del evento
+# (buscando por equipos y fecha) y luego pedimos el detalle para leer
+# el árbitro. Todo con httpx, sin dependencias extra.
+
+def buscar_referee_sofascore(home, away, date_str):
+    """Busca el árbitro en Sofascore usando los nombres de equipos y la fecha."""
+    try:
+        # 1. Buscar el partido del día en Sofascore
+        url = f"https://api.sofascore.com/api/v1/sport/football/scheduled-events/{date_str}"
+        r = http().get(url, timeout=15)
+        r.raise_for_status()
+        eventos = r.json().get("events", [])
+        event_id = None
+        for ev in eventos:
+            if (ev.get("homeTeam", {}).get("name") == home and
+                ev.get("awayTeam", {}).get("name") == away):
+                event_id = ev.get("id")
+                break
+        if not event_id:
+            return None
+
+        # 2. Obtener el detalle del evento para leer el árbitro
+        url_det = f"https://api.sofascore.com/api/v1/event/{event_id}"
+        r2 = http().get(url_det, timeout=15)
+        r2.raise_for_status()
+        data = r2.json().get("event", {})
+        ref = data.get("referee", {})
+        if isinstance(ref, dict):
+            return ref.get("name")
+        return None
+    except Exception:
+        return None
 
 
 def parse_cards(data, match_id, league_id, date, home, away):
@@ -255,6 +273,10 @@ def parse_cards(data, match_id, league_id, date, home, away):
         red_w = (red_w if red_w is not None else rojas_directas_w + segunda_w)
 
     referee = buscar_referee(data)
+    if not referee:
+        # Respaldo: si FotMob no dio árbitro, probamos con Sofascore
+        referee = buscar_referee_sofascore(home, away, date)
+
     fuente = "eventos+status"
 
     # Mercado "total de tarjetas": amarilla=1, roja=2 (incluye directas y

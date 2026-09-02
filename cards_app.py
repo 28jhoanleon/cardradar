@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cards_data import (api, dig, LIGAS, cx, db_init, update_fixtures,
-                         process_matches)
+                         process_matches, buscar_referee)
 
 try:
     from starlette.applications import Starlette
@@ -39,6 +39,28 @@ try:
     from starlette.routing import Route
 except ImportError:
     sys.exit("Falta starlette.  Corre:  pip install starlette uvicorn")
+
+
+# ======================= CACHÉ DE ÁRBITROS ==============================
+# Guardamos los árbitros de partidos futuros para no repetir llamadas a FotMob.
+_ref_cache = {}
+
+def obtener_referee(match_id, home, away, date_str):
+    """Devuelve el árbitro del partido, buscando en FotMob y luego en Sofascore."""
+    if match_id in _ref_cache:
+        return _ref_cache[match_id]
+    try:
+        data = api("matchDetails", matchId=match_id)
+        ref = buscar_referee(data)
+        if not ref:
+            # Respaldo Sofascore (importado desde cards_data)
+            from cards_data import buscar_referee_sofascore
+            ref = buscar_referee_sofascore(home, away, date_str)
+        _ref_cache[match_id] = ref
+        return ref
+    except Exception:
+        _ref_cache[match_id] = None
+        return None
 
 
 # ======================= MODELO POISSON (sin scipy) =====================
@@ -167,16 +189,16 @@ def api_proximos():
         home_est = probas_equipo(p["home"], rival=p["away"])
         away_est = probas_equipo(p["away"], rival=p["home"])
         lam_total = home_est["lambda"] + away_est["lambda"]
-        # Lineas mas altas para el total del partido, tiene sentido que
-        # sea la suma de las de cada equipo.
         LINEAS_TOTAL = [7, 8, 9, 10, 11]
         combinado = {
             "lambda": round(lam_total, 2),
             "under": {str(x): round(poisson_cdf(x - 1, lam_total) * 100, 1)
                       for x in LINEAS_TOTAL},
         }
+        # Obtener árbitro (con caché)
+        referee = obtener_referee(p["match_id"], p["home"], p["away"], p["fecha"])
         out.append({**p, "home_est": home_est, "away_est": away_est,
-                    "combinado": combinado})
+                    "combinado": combinado, "referee": referee})
     return out
 
 
@@ -283,7 +305,7 @@ h1{font-family:var(--f-display);font-size:26px;margin:4px 0 2px;
 function clase(p){ return p>=70?'hi':(p>=50?'mid':'lo'); }
 let combinada = [];
 
-function esc(s){ return String(s).replace(/'/g, "\\'"); }
+function esc(s){ return String(s).replace(/'/g, "\\\\'"); }
 
 function agregarPata(texto, prob, el){
   if (combinada.find(c=>c.texto===texto)) return;
@@ -369,6 +391,7 @@ async function cargar(){
     el.innerHTML = data.map(p=>`
       <div class="match">
         <div class="meta"><span>${p.fecha} - ${p.liga}</span>
+          ${p.referee ? `<span>Árbitro: ${p.referee}</span>` : `<span>Árbitro: ?</span>`}
           <span class="badge ${p.home_est.confiable&&p.away_est.confiable?'ok':''}">
             ${p.home_est.confiable&&p.away_est.confiable?'muestra ok':'revisar muestra'}
           </span></div>
