@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cards_data import (api, dig, LIGAS, cx, db_init, update_fixtures,
-                         process_matches, _normalizar)
+                         process_matches, _normalizar, actualizar_arbitros)
 
 try:
     from starlette.applications import Starlette
@@ -191,10 +191,23 @@ def api_proximos():
 
 def loop_actualizacion():
     db_init()
+    with cx() as c:
+        n = c.execute("SELECT COUNT(*) FROM team_cards").fetchone()[0]
+    if n < 100:
+        print(f"[actualizador] base con {n} filas, muy poco. "
+              f"Corriendo backfill completo UNA vez (puede tardar ~20 min)...")
+        try:
+            update_fixtures(dias=365, quiet=True)
+            process_matches(limite=99999)
+            actualizar_arbitros()
+            print("[actualizador] backfill inicial terminado.")
+        except Exception as e:
+            print(f"[actualizador] fallo el backfill inicial: {e}")
     while True:
         try:
             update_fixtures(dias=5, quiet=True)
             process_matches(limite=40)
+            actualizar_arbitros()
         except Exception as e:
             print(f"[actualizador] error: {e}")
         time.sleep(6 * 3600)
