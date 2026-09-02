@@ -174,7 +174,7 @@ def api_proximos():
         lam_total = home_est["lambda"] + away_est["lambda"]
         # Lineas mas altas para el total del partido, tiene sentido que
         # sea la suma de las de cada equipo.
-        LINEAS_TOTAL = [7, 8, 9, 10, 11]
+        LINEAS_TOTAL = [6, 7, 8, 9, 10, 11]
         combinado = {
             "lambda": round(lam_total, 2),
             "under": {str(x): round(poisson_cdf(x - 1, lam_total) * 100, 1)
@@ -294,6 +294,11 @@ h1{font-family:'Playfair Display',serif;font-size:30px;margin:0 0 6px;
 <h1>&#128203; CardRadar</h1>
 <div class="sub">Proximos partidos - Liga Profesional - prob. de "menos de X tarjetas" por equipo</div>
 <div class="sub" style="margin-top:2px">Toca cualquier porcentaje para agregarlo a tu combinada</div>
+<button onclick="sugerirCombinada()" style="margin-top:14px;background:#eef3ee;
+  color:#0a1210;border:none;border-radius:20px;padding:10px 18px;
+  font-family:var(--f-body);font-weight:600;font-size:13px;cursor:pointer">
+  &#10024; Sugerime una combinada
+</button>
 </div>
 <div id="app" class="loading">Cargando proximos partidos...</div>
 
@@ -310,6 +315,7 @@ h1{font-family:'Playfair Display',serif;font-size:30px;margin:0 0 6px;
 <script>
 function clase(p){ return p>=70?'hi':(p>=50?'mid':'lo'); }
 let combinada = [];
+let datosGlobales = [];
 
 function esc(s){ return String(s).replace(/'/g, "\\'"); }
 
@@ -343,6 +349,52 @@ function calcularEdge(){
   out.innerHTML = `<div class="total-row"><span>Prob. implicita de esa cuota</span><span>${impli.toFixed(1)}%</span></div>
     <div class="total-row"><span>Diferencia (edge)</span><span class="pct ${edge>=0?'hi':'lo'}">${edge>=0?'+':''}${edge.toFixed(1)}%</span></div>`;
 }
+function sugerirCombinada(){
+  if(!datosGlobales.length){
+    alert('Todavia no cargaron los partidos, esperá un segundo y probá de nuevo.');
+    return;
+  }
+  vaciarCombinada();
+  const candidatas = [];
+  datosGlobales.forEach(p=>{
+    [p.home_est, p.away_est].forEach(t=>{
+      // Evitamos las lineas obvias (menos de 7/8, que casi siempre dan
+      // altisimo) y priorizamos 4/5/6, que es donde el mercado real
+      // paga mejor cuota. Preferimos la de mayor probabilidad entre
+      // esas.
+      ['5','6','4'].forEach(x=>{
+        if(t.under && t.under[x] !== undefined){
+          candidatas.push({
+            texto: `${t.equipo} - Menos de ${x}`,
+            prob: t.under[x],
+            equipo: t.equipo,
+            confiable: t.confiable,
+          });
+        }
+      });
+    });
+  });
+  // primero las de equipo con muestra confiable, despues por probabilidad
+  candidatas.sort((a,b)=> (b.confiable - a.confiable) || (b.prob - a.prob));
+  const usados = new Set();
+  let agregadas = 0;
+  for(const c of candidatas){
+    if(usados.has(c.equipo)) continue;
+    if(c.prob < 55) continue;  // no sugerimos patas de moneda al aire
+    usados.add(c.equipo);
+    combinada.push({texto: c.texto, prob: c.prob});
+    agregadas++;
+    if(agregadas >= 6) break;
+  }
+  if(!agregadas){
+    alert('No encontre suficientes equipos con muestra confiable todavia '+
+          'para armar una sugerencia. Segui cargando historial.');
+    return;
+  }
+  renderCombinada();
+  document.getElementById('combi-bar').scrollIntoView({behavior:'smooth', block:'end'});
+}
+
 function renderCombinada(){
   const bar = document.getElementById('combi-bar');
   const count = document.getElementById('combi-count');
@@ -394,6 +446,7 @@ async function cargar(){
       return;
     }
     el.className='';
+    datosGlobales = data;
     el.innerHTML = data.map(p=>`
       <div class="match">
         <div class="meta"><span>${p.fecha} - ${p.liga}${p.arbitro ? ' &middot; \u26AB ' + p.arbitro : ''}</span>
