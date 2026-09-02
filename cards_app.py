@@ -224,43 +224,45 @@ HTML = """<!DOCTYPE html>
 <title>CardRadar</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Oswald:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
-  --bg:#0a1210; --card:#111d17; --card2:#182620; --line:#233029;
-  --text:#eef3ee; --mut:#87a091; --em:#4ade80; --warn:#f0c419; --red:#e2434a;
-  --accent:#f0c419;
-  --f-display:'Oswald',sans-serif; --f-body:'IBM Plex Sans',sans-serif;
+  --bg:#0b0c0e; --card:#151619; --card2:#1c1e22; --line:#2a2c31;
+  --text:#f0f0ee; --mut:#8b8d94; --em:#4ade80; --warn:#f0b429; --red:#f0725e;
+  --accent:#f0b429;
+  --f-body:'IBM Plex Sans',sans-serif;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);
   font-family:var(--f-body);
   padding:16px 14px 200px}
-h1{font-family:'Playfair Display',serif;font-size:30px;margin:0 0 6px;
-  font-weight:600;letter-spacing:.005em;color:#f3fbf3}
-.hero{position:relative;border-radius:22px;padding:38px 20px 26px;
-  margin-bottom:18px;overflow:hidden;
-  background:
-    radial-gradient(circle at 22% 15%, rgba(217,249,157,.55) 0%, transparent 42%),
-    radial-gradient(circle at 78% 8%, rgba(74,222,128,.6) 0%, transparent 55%),
-    radial-gradient(circle at 50% 100%, #06150e 0%, #030a06 75%)}
-.hero .sub{color:rgba(238,243,238,.72)}
-.sub{color:var(--mut);font-size:13px;margin-bottom:18px}
+h1{font-family:var(--f-body);font-size:22px;margin:0 0 4px;font-weight:700}
+.hero{border-radius:14px;padding:18px 16px;margin-bottom:16px;
+  background:var(--card);border-left:3px solid var(--accent)}
+.hero .sub{color:var(--mut)}
+.sub{color:var(--mut);font-size:13px;margin-bottom:6px}
 .match{background:var(--card);border:1px solid var(--line);
-  border-radius:14px;padding:14px;margin-bottom:12px}
-.meta{color:var(--mut);font-size:12.5px;margin-bottom:10px;
-  display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+  border-radius:12px;margin-bottom:10px;overflow:hidden}
+.mhead{padding:12px 14px;cursor:pointer;display:flex;flex-direction:column;gap:4px}
+.mhead:active{background:var(--card2)}
+.mteams{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.mteams .tt{font-weight:600;font-size:14.5px}
+.mmeta{color:var(--mut);font-size:11px}
+.mbest{display:flex;align-items:center;justify-content:space-between;
+  gap:8px;margin-top:2px}
+.mbest-txt{font-size:12.5px;color:var(--text)}
+.chevron{color:var(--mut);font-size:11px;transition:transform .15s}
+.mdetail{padding:0 14px 14px;border-top:1px solid var(--line)}
+.meta{color:var(--mut);font-size:12px;margin:12px 0 10px}
 .teams{display:flex;gap:10px}
 .team{flex:1;background:var(--card2);border-radius:10px;padding:10px;min-width:0}
-.total{background:rgba(240,196,25,.06);border:1px solid rgba(240,196,25,.22);
+.total{background:var(--card2);border:1px solid var(--line);
   border-radius:10px;padding:10px;margin-top:8px}
-.total-title{color:var(--accent);font-size:12.5px;font-weight:600;
-  margin-bottom:6px;font-family:var(--f-body)}
+.total-title{color:var(--accent);font-size:12px;font-weight:600;margin-bottom:6px}
 .total-row{display:flex;justify-content:space-between;align-items:center;
   font-size:12.5px;padding:3px 0}
-.tname{font-family:var(--f-display);font-weight:600;font-size:16px;
-  margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-  letter-spacing:.01em}
+.tname{font-weight:600;font-size:14px;margin-bottom:2px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
 .tsamp{color:var(--mut);font-size:10.5px;margin-bottom:8px}
 .lam{color:var(--accent);font-size:11px;margin-bottom:8px}
 .nota{color:var(--mut);font-size:10px;margin-bottom:4px;font-style:italic}
@@ -274,11 +276,11 @@ h1{font-family:'Playfair Display',serif;font-size:30px;margin:0 0 6px;
 .chip.hi{background:var(--em)}
 .chip.mid{background:var(--warn)}
 .chip.lo{background:var(--red)}
-.pct{font-family:var(--f-display);font-weight:600;font-size:13px}
+.pct{font-weight:700;font-size:13px}
 .hi{color:var(--em)}.mid{color:var(--warn)}.lo{color:var(--red)}
 .badge{font-size:10px;padding:2px 7px;border-radius:20px;
   background:rgba(255,255,255,.06);color:var(--mut);white-space:nowrap}
-.badge.ok{background:rgba(63,185,80,.15);color:var(--em)}
+.badge.ok{background:rgba(74,222,128,.15);color:var(--em)}
 .empty{color:var(--mut);text-align:center;padding:40px 10px;font-size:14px;
   line-height:1.5}
 .loading{color:var(--mut);text-align:center;padding:30px}
@@ -292,11 +294,11 @@ h1{font-family:'Playfair Display',serif;font-size:30px;margin:0 0 6px;
 <body>
 <div class="hero">
 <h1>&#128203; CardRadar</h1>
-<div class="sub">Proximos partidos - Liga Profesional - prob. de "menos de X tarjetas" por equipo</div>
-<div class="sub" style="margin-top:2px">Toca cualquier porcentaje para agregarlo a tu combinada</div>
-<button onclick="sugerirCombinada()" style="margin-top:14px;background:#eef3ee;
-  color:#0a1210;border:none;border-radius:20px;padding:10px 18px;
-  font-family:var(--f-body);font-weight:600;font-size:13px;cursor:pointer">
+<div class="sub">Proximos partidos - Liga Profesional - prob. de "menos de X tarjetas"</div>
+<div class="sub" style="margin-bottom:0">Tocá un partido para ver el detalle. Tocá un porcentaje para sumarlo a tu combinada.</div>
+<button onclick="sugerirCombinada()" style="margin-top:12px;background:var(--accent);
+  color:#171208;border:none;border-radius:20px;padding:10px 18px;
+  font-family:var(--f-body);font-weight:700;font-size:13px;cursor:pointer">
   &#10024; Sugerime una combinada
 </button>
 </div>
@@ -349,6 +351,32 @@ function calcularEdge(){
   out.innerHTML = `<div class="total-row"><span>Prob. implicita de esa cuota</span><span>${impli.toFixed(1)}%</span></div>
     <div class="total-row"><span>Diferencia (edge)</span><span class="pct ${edge>=0?'hi':'lo'}">${edge>=0?'+':''}${edge.toFixed(1)}%</span></div>`;
 }
+function mejorApuesta(p){
+  // Elige la pata mas representativa para el resumen colapsado: entre
+  // las lineas 4/5/6 de cada equipo, la de mayor probabilidad,
+  // priorizando equipos con muestra confiable.
+  const candidatas = [];
+  [p.home_est, p.away_est].forEach(t=>{
+    ['5','6','4'].forEach(x=>{
+      if(t.under && t.under[x] !== undefined){
+        candidatas.push({texto: `${t.equipo} - Menos de ${x}`,
+                          prob: t.under[x], confiable: t.confiable});
+      }
+    });
+  });
+  candidatas.sort((a,b)=> (b.confiable - a.confiable) || (b.prob - a.prob));
+  const m = candidatas[0] || {texto: 'sin datos', prob: 0};
+  return {texto: m.texto, prob: m.prob, clase: clase(m.prob)};
+}
+
+function toggleMatch(i){
+  const det = document.getElementById('det-'+i);
+  const chev = document.getElementById('chev-'+i);
+  const abierto = det.style.display !== 'none';
+  det.style.display = abierto ? 'none' : 'block';
+  chev.style.transform = abierto ? '' : 'rotate(180deg)';
+}
+
 function sugerirCombinada(){
   if(!datosGlobales.length){
     alert('Todavia no cargaron los partidos, esperá un segundo y probá de nuevo.');
@@ -447,24 +475,39 @@ async function cargar(){
     }
     el.className='';
     datosGlobales = data;
-    el.innerHTML = data.map(p=>`
+    el.innerHTML = data.map((p,i)=>{
+      const mejor = mejorApuesta(p);
+      return `
       <div class="match">
-        <div class="meta"><span>${p.fecha} - ${p.liga}${p.arbitro ? ' &middot; \u26AB ' + p.arbitro : ''}</span>
-          <span class="badge ${p.home_est.confiable&&p.away_est.confiable?'ok':''}">
+        <div class="mhead" onclick="toggleMatch(${i})">
+          <div class="mteams">
+            <span class="tt">${p.home} <span style="color:var(--mut);font-weight:400">vs</span> ${p.away}</span>
+            <span class="chevron" id="chev-${i}">&#9662;</span>
+          </div>
+          <div class="mmeta">${p.fecha}${p.arbitro ? ' &middot; \u26AB ' + p.arbitro : ''}</div>
+          <div class="mbest">
+            <span class="mbest-txt">Mejor dato: ${mejor.texto}</span>
+            <span class="pctwrap"><span class="chip ${mejor.clase}"></span><span class="pct ${mejor.clase}">${mejor.prob}%</span></span>
+          </div>
+        </div>
+        <div class="mdetail" id="det-${i}" style="display:none">
+          <div class="meta"><span class="badge ${p.home_est.confiable&&p.away_est.confiable?'ok':''}">
             ${p.home_est.confiable&&p.away_est.confiable?'muestra ok':'revisar muestra'}
           </span></div>
-        <div class="teams">
-          ${tarjetaEquipo(p.home_est)}
-          ${tarjetaEquipo(p.away_est)}
+          <div class="teams">
+            ${tarjetaEquipo(p.home_est)}
+            ${tarjetaEquipo(p.away_est)}
+          </div>
+          <div class="total">
+            <div class="total-title">Total del partido (ambos equipos combinados) - prom. ${p.combinado.lambda}</div>
+            ${Object.keys(p.combinado.under).map(x=>`<div class="total-row" onclick="agregarPata('Total ${esc(p.home)} vs ${esc(p.away)} - Menos de ${x}', ${p.combinado.under[x]}, this)">
+                <span>Menos de ${x} tarjetas en total</span>
+                <span class="pctwrap"><span class="chip ${clase(p.combinado.under[x])}"></span><span class="pct ${clase(p.combinado.under[x])}">${p.combinado.under[x]}%</span></span>
+              </div>`).join('')}
+          </div>
         </div>
-        <div class="total">
-          <div class="total-title">Total del partido (ambos equipos combinados) - prom. ${p.combinado.lambda}</div>
-          ${Object.keys(p.combinado.under).map(x=>`<div class="total-row" onclick="agregarPata('Total ${esc(p.home)} vs ${esc(p.away)} - Menos de ${x}', ${p.combinado.under[x]}, this)">
-              <span>Menos de ${x} tarjetas en total</span>
-              <span class="pctwrap"><span class="chip ${clase(p.combinado.under[x])}"></span><span class="pct ${clase(p.combinado.under[x])}">${p.combinado.under[x]}%</span></span>
-            </div>`).join('')}
-        </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   }catch(e){
     el.innerHTML = '<div class="empty">Error cargando: '+e+'</div>';
   }
