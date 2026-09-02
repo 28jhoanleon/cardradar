@@ -45,6 +45,7 @@ DB_PATH = os.path.join(
     os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
     or os.path.dirname(os.path.abspath(__file__)),
     "cards.db")
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 # Liga Profesional Argentina primero. Mismo formato que remates_v10 asi
 # despues podes pegarle el selector de ligas de ahi si queres mas ligas.
