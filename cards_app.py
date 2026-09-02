@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cards_data import (api, dig, LIGAS, cx, db_init, update_fixtures,
-                         process_matches)
+                         process_matches, _normalizar)
 
 try:
     from starlette.applications import Starlette
@@ -163,8 +163,8 @@ def proximos_partidos(dias=7):
 
 def api_proximos():
     with cx() as c:
-        arbitros_map = {(r["home"], r["away"]): r["arbitro"] for r in
-                         c.execute("SELECT home, away, arbitro FROM arbitros_proximos")}
+        arbitros_map = {(_normalizar(r["home"]), _normalizar(r["away"])): r["arbitro"]
+                         for r in c.execute("SELECT home, away, arbitro FROM arbitros_proximos")}
     out = []
     for p in proximos_partidos():
         home_est = probas_equipo(p["home"], rival=p["away"])
@@ -178,7 +178,7 @@ def api_proximos():
             "under": {str(x): round(poisson_cdf(x - 1, lam_total) * 100, 1)
                       for x in LINEAS_TOTAL},
         }
-        arbitro = arbitros_map.get((p["home"], p["away"]))
+        arbitro = arbitros_map.get((_normalizar(p["home"]), _normalizar(p["away"])))
         out.append({**p, "home_est": home_est, "away_est": away_est,
                     "combinado": combinado, "arbitro": arbitro})
     return out
