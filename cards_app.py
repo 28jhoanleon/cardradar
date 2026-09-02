@@ -102,11 +102,17 @@ def proximos_partidos(dias=7):
 def api_proximos():
     out = []
     for p in proximos_partidos():
-        out.append({
-            **p,
-            "home_est": probas_equipo(p["home"]),
-            "away_est": probas_equipo(p["away"]),
-        })
+        home_est = probas_equipo(p["home"])
+        away_est = probas_equipo(p["away"])
+        lam_total = home_est["lambda"] + away_est["lambda"]
+        LINEAS_TOTAL = [7, 8, 9, 10, 11]
+        combinado = {
+            "lambda": round(lam_total, 2),
+            "under": {str(x): round(poisson_cdf(x - 1, lam_total) * 100, 1)
+                      for x in LINEAS_TOTAL},
+        }
+        out.append({**p, "home_est": home_est, "away_est": away_est,
+                    "combinado": combinado})
     return out
 
 
@@ -145,6 +151,12 @@ h1{font-size:20px;margin:4px 0 2px;font-weight:700}
   gap:8px;flex-wrap:wrap}
 .teams{display:flex;gap:10px}
 .team{flex:1;background:var(--card2);border-radius:10px;padding:10px;min-width:0}
+.total{background:rgba(88,166,255,.08);border:1px solid rgba(88,166,255,.25);
+  border-radius:10px;padding:10px;margin-top:8px}
+.total-title{color:var(--accent);font-size:11px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
+.total-row{display:flex;justify-content:space-between;font-size:12.5px;
+  padding:2px 0}
 .tname{font-weight:600;font-size:14px;margin-bottom:2px;white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis}
 .tsamp{color:var(--mut);font-size:10.5px;margin-bottom:8px}
@@ -199,6 +211,13 @@ async function cargar(){
         <div class="teams">
           ${tarjetaEquipo(p.home_est)}
           ${tarjetaEquipo(p.away_est)}
+        </div>
+        <div class="total">
+          <div class="total-title">Total del partido (ambos equipos combinados) - prom. ${p.combinado.lambda}</div>
+          ${Object.keys(p.combinado.under).map(x=>`<div class="total-row">
+              <span>Menos de ${x} tarjetas en total</span>
+              <span class="pct ${clase(p.combinado.under[x])}">${p.combinado.under[x]}%</span>
+            </div>`).join('')}
         </div>
       </div>`).join('');
   }catch(e){

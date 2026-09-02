@@ -298,7 +298,7 @@ def update_fixtures(dias=180, quiet=False):
     return nuevos
 
 
-def process_matches(limite=150):
+def process_matches(limite=600):
     db_init()
     with cx() as c:
         pend = c.execute("SELECT * FROM matches WHERE processed=0 "
