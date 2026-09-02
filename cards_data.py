@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
 """
 cards_data.py - Recolector de datos de TARJETAS por equipo (Liga Profesional
-y las que agregues). Hermano de remates_v10.py, misma infra (FotMob +
+y las que agregues). Hermano de remates_v10.py, misma infra (FotMob + 
 Sofascore de respaldo), pero en vez de remates de jugador guarda tarjetas
 por equipo por partido + el arbitro.
+
+============================ COMO SE USA ==============================
+
+  python cards_data.py --update              trae fixtures + procesa tarjetas
+  python cards_data.py --fixtures            solo trae la lista de partidos
+  python cards_data.py --procesar             solo procesa pendientes
+  python cards_data.py --inspeccionar <id>    vuelca la estructura del JSON
+                                               de un partido puntual, para
+                                               ajustar el extractor si hace
+                                               falta (pasame el output)
+
+Archivo que crea: cards.db (al lado del script). Nada mas.
+=========================================================================
 """
 
 import argparse
@@ -20,11 +33,15 @@ except ImportError:
     sys.exit('Falta httpx.  Corre:  pip install "httpx>=0.27"')
 
 
+# ======================= CONFIG =======================================
+
 DB_PATH = os.path.join(
     os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
     or os.path.dirname(os.path.abspath(__file__)),
     "cards.db")
 
+# Liga Profesional Argentina primero. Mismo formato que remates_v10 asi
+# despues podes pegarle el selector de ligas de ahi si queres mas ligas.
 LIGAS = {
     112: "Argentina - Liga Profesional",
 }
@@ -40,6 +57,8 @@ HEADERS = {
     "Referer": "https://www.fotmob.com/",
 }
 
+
+# ======================= BASE DE DATOS =================================
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS matches(
@@ -80,6 +99,8 @@ def cfg_set(k, v):
     with cx() as c:
         c.execute("INSERT OR REPLACE INTO cfg VALUES(?,?)", (k, v))
 
+
+# ======================= CLIENTE FOTMOB (igual a remates_v10) ==========
 
 _client = None
 
@@ -148,6 +169,26 @@ def _k(x):
     return str(x).lower().replace(" ", "").replace("_", "")
 
 
+# ======================= EXTRACTOR DE TARJETAS ==========================
+# Dos estrategias, igual de espiritu que el extractor generico de remates:
+#   1) Barra de stats del partido: busca un par [home, away] bajo una
+#      clave tipo "Yellow cards" / "Red cards".
+#   2) Lista de eventos del partido: cuenta tarjetas evento por evento y
+#      las asigna a home/away. Mas confiable si (1) no aparece.
+# Si ninguna de las dos anda, --inspeccionar te muestra la estructura
+# real para que la ajustemos.
+
+# Confirmado contra un partido real (Defensa y Justicia vs Platense,
+# match_id 5115967):
+#   - Los ROJOS totales por equipo (directos + por doble amarilla) estan
+#     en header.status.numberOfHomeRedCards / numberOfAwayRedCards.
+#     Es el dato mas confiable posible: lo calcula FotMob mismo.
+#   - Los eventos de tarjeta (una fila por tarjeta) estan en
+#     content.matchFacts.events.events, cada uno con "isHome": bool y
+#     "card": "Yellow" | "Red" | "YellowRed". Contamos "Yellow" ahi para
+#     las amarillas puras (las YellowRed ya se cuentan como rojo arriba).
+
+
 def buscar_referee(data, prof_max=8):
     """Busca recursivamente una clave tipo 'referee' en el JSON."""
     def walk(n, prof=0):
@@ -203,6 +244,8 @@ def parse_cards(data, match_id, league_id, date, home, away):
             elif is_home is False:
                 segunda_w += 1
 
+    # Si por algun motivo no vino el conteo de header.status, usamos lo
+    # que se pudo contar de los eventos (rojas directas + segundas).
     if red_h is None or red_w is None:
         rojas_directas_h = sum(1 for e in eventos if isinstance(e, dict)
                                and _k(e.get("card") or "") == "red" and e.get("isHome"))
@@ -214,6 +257,8 @@ def parse_cards(data, match_id, league_id, date, home, away):
     referee = buscar_referee(data)
     fuente = "eventos+status"
 
+    # Mercado "total de tarjetas": amarilla=1, roja=2 (incluye directas y
+    # las que salen de una segunda amarilla).
     total_h = yellow_h * 1 + red_h * 2
     total_w = yellow_w * 1 + red_w * 2
 
@@ -230,6 +275,8 @@ def parse_cards(data, match_id, league_id, date, home, away):
 
 
 def inspeccionar(match_id):
+    """Igual que en remates_v10: mapa de la estructura real del JSON,
+    para poder ajustar CLAVES_AMARILLA/CLAVES_ROJA si no matchean."""
     data = api("matchDetails", matchId=match_id)
 
     def mapa(n, prof=0, camino=""):
@@ -261,6 +308,8 @@ def inspeccionar(match_id):
         "estructura": mapa(data)[:150],
     }
 
+
+# ======================= ACTUALIZACION ==================================
 
 def update_fixtures(dias=180, quiet=False):
     db_init()
@@ -351,12 +400,16 @@ def process_matches(limite=600):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--update", action="store_true")
-    ap.add_argument("--fixtures", action="store_true")
-    ap.add_argument("--procesar", action="store_true")
-    ap.add_argument("--inspeccionar", type=int, metavar="MATCH_ID")
-    ap.add_argument("--reset-tarjetas", action="store_true")
-    ap.add_argument("--dias", type=int, default=180)
+    ap.add_argument("--update", action="store_true",
+                    help="trae fixtures y procesa tarjetas")
+    ap.add_argument("--fixtures", action="store_true", help="solo fixtures")
+    ap.add_argument("--procesar", action="store_true", help="solo procesar")
+    ap.add_argument("--inspeccionar", type=int, metavar="MATCH_ID",
+                    help="vuelca estructura del JSON de un partido")
+    ap.add_argument("--reset-tarjetas", action="store_true",
+                    help="borra team_cards y marca todo para reprocesar "
+                         "(usalo una vez tras actualizar el extractor)")
+    ap.add_argument("--dias", type=int, default=365)
     a = ap.parse_args()
     db_init()
 
