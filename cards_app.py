@@ -71,11 +71,16 @@ def team_lambda(team, rival=None, n_recientes=15):
       - el historial cabeza a cabeza entre estos dos equipos
         puntuales, con peso limitado a 30% y solo si hay 2+ partidos
         previos entre ellos.
-    """
+    Compara nombres normalizados (sin tildes) para que no se parta la
+    muestra si FotMob guardo el mismo equipo con variantes de acento."""
+    obj_team = _normalizar(team)
     with cx() as c:
-        rows = c.execute(
-            "SELECT total_cards FROM team_cards WHERE team=? "
-            "ORDER BY date DESC LIMIT ?", (team, n_recientes)).fetchall()
+        todas = c.execute(
+            "SELECT team, opponent, total_cards, date FROM team_cards "
+            "ORDER BY date DESC").fetchall()
+
+    propias = [r for r in todas if _normalizar(r["team"]) == obj_team]
+    rows = propias[:n_recientes]
     media_liga = liga_media()
     if not rows:
         lam_propio, n = media_liga, 0
@@ -91,10 +96,9 @@ def team_lambda(team, rival=None, n_recientes=15):
     info = {"ajuste_rival_pct": None, "h2h": None}
 
     if rival:
-        with cx() as c:
-            riv_rows = c.execute(
-                "SELECT total_cards FROM team_cards WHERE opponent=? "
-                "ORDER BY date DESC LIMIT 20", (rival,)).fetchall()
+        obj_rival = _normalizar(rival)
+        riv_rows = [r for r in todas
+                    if _normalizar(r["opponent"]) == obj_rival][:20]
         if riv_rows and media_liga > 0:
             dureza = sum(r["total_cards"] for r in riv_rows) / len(riv_rows)
             factor = max(0.6, min(1.6, dureza / media_liga))
@@ -103,10 +107,8 @@ def team_lambda(team, rival=None, n_recientes=15):
             info["ajuste_rival_pct"] = round((lam_ajustado / lam - 1) * 100, 1) if lam else 0
             lam = lam_ajustado
 
-        with cx() as c:
-            h2h_rows = c.execute(
-                "SELECT total_cards FROM team_cards WHERE team=? AND opponent=? "
-                "ORDER BY date DESC LIMIT 10", (team, rival)).fetchall()
+        h2h_rows = [r for r in propias
+                    if _normalizar(r["opponent"]) == obj_rival][:10]
         if len(h2h_rows) >= 2:
             h2h_prom = sum(r["total_cards"] for r in h2h_rows) / len(h2h_rows)
             w_h2h = min(1.0, len(h2h_rows) / 4.0) * 0.30
