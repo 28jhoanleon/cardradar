@@ -167,41 +167,51 @@ HTML = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CardRadar</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root{
-  --bg:#0d1117; --card:#161b22; --card2:#1c2430; --line:#262f3d;
-  --text:#e6edf3; --mut:#8b96a5; --em:#3fb950; --warn:#e3b341; --red:#f85149;
-  --accent:#58a6ff;
+  --bg:#0a1210; --card:#111d17; --card2:#182620; --line:#233029;
+  --text:#eef3ee; --mut:#87a091; --em:#4ade80; --warn:#f0c419; --red:#e2434a;
+  --accent:#f0c419;
+  --f-display:'Oswald',sans-serif; --f-body:'IBM Plex Sans',sans-serif;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);
-  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  font-family:var(--f-body);
   padding:16px 14px 200px}
-h1{font-size:20px;margin:4px 0 2px;font-weight:700}
+h1{font-family:var(--f-display);font-size:26px;margin:4px 0 2px;
+  font-weight:600;letter-spacing:.01em}
 .sub{color:var(--mut);font-size:13px;margin-bottom:18px}
 .match{background:var(--card);border:1px solid var(--line);
   border-radius:14px;padding:14px;margin-bottom:12px}
-.meta{color:var(--mut);font-size:11.5px;text-transform:uppercase;
-  letter-spacing:.04em;margin-bottom:10px;display:flex;justify-content:space-between;
-  gap:8px;flex-wrap:wrap}
+.meta{color:var(--mut);font-size:12.5px;margin-bottom:10px;
+  display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
 .teams{display:flex;gap:10px}
 .team{flex:1;background:var(--card2);border-radius:10px;padding:10px;min-width:0}
-.total{background:rgba(88,166,255,.08);border:1px solid rgba(88,166,255,.25);
+.total{background:rgba(240,196,25,.06);border:1px solid rgba(240,196,25,.22);
   border-radius:10px;padding:10px;margin-top:8px}
-.total-title{color:var(--accent);font-size:11px;font-weight:700;
-  text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
-.total-row{display:flex;justify-content:space-between;font-size:12.5px;
-  padding:2px 0}
-.tname{font-weight:600;font-size:14px;margin-bottom:2px;white-space:nowrap;
-  overflow:hidden;text-overflow:ellipsis}
+.total-title{color:var(--accent);font-size:12.5px;font-weight:600;
+  margin-bottom:6px;font-family:var(--f-body)}
+.total-row{display:flex;justify-content:space-between;align-items:center;
+  font-size:12.5px;padding:3px 0}
+.tname{font-family:var(--f-display);font-weight:600;font-size:16px;
+  margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  letter-spacing:.01em}
 .tsamp{color:var(--mut);font-size:10.5px;margin-bottom:8px}
 .lam{color:var(--accent);font-size:11px;margin-bottom:8px}
-.row{display:flex;justify-content:space-between;font-size:12px;
-  padding:3px 0;border-top:1px solid var(--line);cursor:pointer}
+.row{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;
+  padding:4px 0;border-top:1px solid var(--line);cursor:pointer}
 .row:first-of-type{border-top:none}
-.row.added,.total-row.added{background:rgba(63,185,80,.12);border-radius:6px;
+.row.added,.total-row.added{background:rgba(74,222,128,.1);border-radius:6px;
   padding-left:4px;padding-right:4px}
-.pct{font-weight:700}
+.pctwrap{display:flex;align-items:center;gap:6px}
+.chip{width:9px;height:13px;border-radius:2px;flex-shrink:0}
+.chip.hi{background:var(--em)}
+.chip.mid{background:var(--warn)}
+.chip.lo{background:var(--red)}
+.pct{font-family:var(--f-display);font-weight:600;font-size:13px}
 .hi{color:var(--em)}.mid{color:var(--warn)}.lo{color:var(--red)}
 .badge{font-size:10px;padding:2px 7px;border-radius:20px;
   background:rgba(255,255,255,.06);color:var(--mut);white-space:nowrap}
@@ -295,7 +305,7 @@ function tarjetaEquipo(t){
     <div class="lam">prom. esperado: ${t.lambda} tarjetas</div>
     ${Object.keys(u).map(x=>`<div class="row" onclick="agregarPata('${esc(t.equipo)} - Menos de ${x}', ${u[x]}, this)">
         <span>Menos de ${x}</span>
-        <span class="pct ${clase(u[x])}">${u[x]}%</span>
+        <span class="pctwrap"><span class="chip ${clase(u[x])}"></span><span class="pct ${clase(u[x])}">${u[x]}%</span></span>
       </div>`).join('')}
   </div>`;
 }
@@ -324,7 +334,7 @@ async function cargar(){
           <div class="total-title">Total del partido (ambos equipos combinados) - prom. ${p.combinado.lambda}</div>
           ${Object.keys(p.combinado.under).map(x=>`<div class="total-row" onclick="agregarPata('Total ${esc(p.home)} vs ${esc(p.away)} - Menos de ${x}', ${p.combinado.under[x]}, this)">
               <span>Menos de ${x} tarjetas en total</span>
-              <span class="pct ${clase(p.combinado.under[x])}">${p.combinado.under[x]}%</span>
+              <span class="pctwrap"><span class="chip ${clase(p.combinado.under[x])}"></span><span class="pct ${clase(p.combinado.under[x])}">${p.combinado.under[x]}%</span></span>
             </div>`).join('')}
         </div>
       </div>`).join('');
