@@ -1,7 +1,28 @@
 #!/usr/bin/env python3
+"""
+cards_data.py - Recolector de datos de TARJETAS por equipo (Liga Profesional
+y las que agregues). Hermano de remates_v10.py, misma infra (FotMob + 
+Sofascore de respaldo), pero en vez de remates de jugador guarda tarjetas
+por equipo por partido + el arbitro.
+
+============================ COMO SE USA ==============================
+
+  python cards_data.py --update              trae fixtures + procesa tarjetas
+  python cards_data.py --fixtures            solo trae la lista de partidos
+  python cards_data.py --procesar             solo procesa pendientes
+  python cards_data.py --inspeccionar <id>    vuelca la estructura del JSON
+                                               de un partido puntual, para
+                                               ajustar el extractor si hace
+                                               falta (pasame el output)
+
+Archivo que crea: cards.db (al lado del script). Nada mas.
+=========================================================================
+"""
+
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -12,11 +33,21 @@ try:
 except ImportError:
     sys.exit('Falta httpx.  Corre:  pip install "httpx>=0.27"')
 
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None
+
+
+# ======================= CONFIG =======================================
+
 DB_PATH = os.path.join(
     os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
     or os.path.dirname(os.path.abspath(__file__)),
     "cards.db")
 
+# Liga Profesional Argentina primero. Mismo formato que remates_v10 asi
+# despues podes pegarle el selector de ligas de ahi si queres mas ligas.
 LIGAS = {
     112: "Argentina - Liga Profesional",
 }
@@ -32,6 +63,9 @@ HEADERS = {
     "Referer": "https://www.fotmob.com/",
 }
 
+
+# ======================= BASE DE DATOS =================================
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS matches(
   match_id INTEGER PRIMARY KEY, league_id INTEGER, league TEXT,
@@ -44,16 +78,22 @@ CREATE TABLE IF NOT EXISTS team_cards(
   PRIMARY KEY(match_id, team));
 CREATE INDEX IF NOT EXISTS ix_team ON team_cards(team);
 CREATE TABLE IF NOT EXISTS cfg(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS arbitros_proximos(
+  home TEXT, away TEXT, arbitro TEXT, actualizado TEXT,
+  PRIMARY KEY(home, away));
 """
+
 
 def cx():
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
     return c
 
+
 def db_init():
     with cx() as c:
         c.executescript(SCHEMA)
+
 
 def cfg_get(k, d=None):
     try:
@@ -63,11 +103,16 @@ def cfg_get(k, d=None):
     except Exception:
         return d
 
+
 def cfg_set(k, v):
     with cx() as c:
         c.execute("INSERT OR REPLACE INTO cfg VALUES(?,?)", (k, v))
 
+
+# ======================= CLIENTE FOTMOB (igual a remates_v10) ==========
+
 _client = None
+
 
 def http():
     global _client
@@ -75,8 +120,10 @@ def http():
         _client = httpx.Client(headers=HEADERS, timeout=30, follow_redirects=True)
     return _client
 
+
 def base_ok():
     return cfg_get("fotmob_base") or BASES[0]
+
 
 def api(path, retries=3, **params):
     orden = [base_ok()] + [b for b in BASES if b != base_ok()]
@@ -101,6 +148,7 @@ def api(path, retries=3, **params):
                     time.sleep(2 * (i + 1))
     raise last
 
+
 def dig(o, *ks, default=None):
     for k in ks:
         if isinstance(o, dict) and k in o:
@@ -108,6 +156,7 @@ def dig(o, *ks, default=None):
         else:
             return default
     return o
+
 
 def num(v, d=0.0):
     if v is None:
@@ -124,21 +173,173 @@ def num(v, d=0.0):
     except ValueError:
         return d
 
+
 def _k(x):
     return str(x).lower().replace(" ", "").replace("_", "")
 
-# Mejor búsqueda de árbitro (busca en todo el JSON)
-def buscar_referee(data, prof_max=10):
+
+# ======================= EXTRACTOR DE TARJETAS ==========================
+# Dos estrategias, igual de espiritu que el extractor generico de remates:
+#   1) Barra de stats del partido: busca un par [home, away] bajo una
+#      clave tipo "Yellow cards" / "Red cards".
+#   2) Lista de eventos del partido: cuenta tarjetas evento por evento y
+#      las asigna a home/away. Mas confiable si (1) no aparece.
+# Si ninguna de las dos anda, --inspeccionar te muestra la estructura
+# real para que la ajustemos.
+
+# Confirmado contra un partido real (Defensa y Justicia vs Platense,
+# match_id 5115967):
+#   - Los ROJOS totales por equipo (directos + por doble amarilla) estan
+#     en header.status.numberOfHomeRedCards / numberOfAwayRedCards.
+#     Es el dato mas confiable posible: lo calcula FotMob mismo.
+#   - Los eventos de tarjeta (una fila por tarjeta) estan en
+#     content.matchFacts.events.events, cada uno con "isHome": bool y
+#     "card": "Yellow" | "Red" | "YellowRed". Contamos "Yellow" ahi para
+#     las amarillas puras (las YellowRed ya se cuentan como rojo arriba).
+
+
+import unicodedata
+
+ALIAS_ARBITRAJE = {
+    "estudiantes rio cuarto": "estudiantes de rio cuarto",
+    "gimnasia mza": "gimnasia mendoza",
+    "gimnasia mendoza": "gimnasia mendoza",
+    "ind rivadavia mza": "independiente rivadavia",
+    "central cordoba": "central cordoba de santiago",
+    "newells": "newells old boys",
+    "river": "river plate",
+    "racing": "racing club",
+    "boca": "boca juniors",
+    "velez": "velez sarsfield",
+    "dep riestra": "deportivo riestra",
+}
+
+
+def _normalizar(s):
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower().replace("'", "").replace("’", "")
+    s = re.sub(r"[^a-z0-9\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+_PALABRAS_VACIAS = {"de", "del", "la", "el", "los"}
+
+
+def mapear_equipo_lpf(nombre_corto, nombres_db):
+    """Busca en nombres_db (nombres tal cual vienen de FotMob) cual
+    corresponde a nombre_corto (tal cual aparece en la nota de la LPF).
+    Devuelve el nombre de nombres_db que mejor matchea, o None."""
+    n = _normalizar(nombre_corto)
+    n = ALIAS_ARBITRAJE.get(n, n)
+    palabras_corto = set(n.split()) - _PALABRAS_VACIAS
+    if not palabras_corto:
+        return None
+    mejor, mejor_score = None, 0
+    for db_name in nombres_db:
+        nd = _normalizar(db_name)
+        palabras_db = set(nd.split()) - _PALABRAS_VACIAS
+        if not palabras_db:
+            continue
+        if palabras_corto.issubset(palabras_db) or palabras_db.issubset(palabras_corto):
+            score = len(palabras_corto & palabras_db)
+            if score > mejor_score:
+                mejor, mejor_score = db_name, score
+    return mejor
+
+
+def obtener_arbitros_lpf():
+    """Baja la nota mas reciente de designaciones arbitrales de la LPF
+    y devuelve una lista de (equipo_local_corto, equipo_visita_corto,
+    arbitro). Si algo falla devuelve [] sin romper el resto."""
+    if BeautifulSoup is None:
+        print("  [arbitros] falta beautifulsoup4. Instalalo con: "
+              "pip install beautifulsoup4")
+        return []
+    try:
+        r = http().get("https://www.ligaprofesional.ar/categoria/arbitraje/",
+                        timeout=20)
+        r.raise_for_status()
+        m = re.search(
+            r'https://www\.ligaprofesional\.ar/notas/arbitraje/[^\s"\'<>]+/',
+            r.text)
+        if not m:
+            print("  [arbitros] no encontre el link a la ultima nota")
+            return []
+        url_nota = m.group(0)
+        r2 = http().get(url_nota, timeout=20)
+        r2.raise_for_status()
+    except Exception as e:
+        print(f"  [arbitros] no se pudo bajar la nota: {e}")
+        return []
+
+    soup = BeautifulSoup(r2.text, "html.parser")
+    texto = soup.get_text("\n")
+    ini = texto.find("Designaciones arbitrales")
+    fin = texto.find("Últimas noticias")
+    if ini == -1:
+        ini = 0
+    if fin == -1:
+        fin = len(texto)
+    bloque = texto[ini:fin]
+
+    patron = re.compile(
+        r"\d{1,2}[:.]\d{2}\s+(.+?)\s*[–—-]\s*(.+?)\s*\([^)]*\)"
+        r"(?:\s*\([^)]*\))?\s*\n+\s*[ÁA]rbitro:\s*([^\n]+)",
+        re.IGNORECASE)
+
+    resultado = []
+    for m in patron.finditer(bloque):
+        home_corto = m.group(1).strip()
+        away_corto = m.group(2).strip()
+        arbitro = m.group(3).strip()
+        resultado.append((home_corto, away_corto, arbitro))
+    return resultado
+
+
+def actualizar_arbitros():
+    """Descarga las designaciones y las guarda en arbitros_proximos,
+    matcheando los nombres cortos de la LPF contra los nombres que
+    usamos en el resto de la base (los de FotMob)."""
+    designaciones = obtener_arbitros_lpf()
+    if not designaciones:
+        return 0
+    with cx() as c:
+        nombres_db = [r[0] for r in c.execute(
+            "SELECT DISTINCT home FROM matches UNION "
+            "SELECT DISTINCT away FROM matches")]
+    guardados = 0
+    with cx() as c:
+        for home_corto, away_corto, arbitro in designaciones:
+            home_db = mapear_equipo_lpf(home_corto, nombres_db)
+            away_db = mapear_equipo_lpf(away_corto, nombres_db)
+            if not home_db or not away_db:
+                print(f"  [arbitros] no pude mapear '{home_corto}' vs "
+                      f"'{away_corto}' (local={home_db}, visita={away_db})")
+                continue
+            c.execute(
+                "INSERT OR REPLACE INTO arbitros_proximos VALUES (?,?,?,?)",
+                (home_db, away_db, arbitro,
+                 datetime.now(timezone.utc).isoformat()))
+            guardados += 1
+            print(f"  [arbitros] {home_db} vs {away_db}: {arbitro}")
+    print(f"\nArbitros guardados: {guardados}/{len(designaciones)}")
+    return guardados
+
+
+def buscar_referee(data, prof_max=8):
+    """Busca recursivamente una clave tipo 'referee' en el JSON."""
     def walk(n, prof=0):
         if prof > prof_max:
             return None
         if isinstance(n, dict):
             for k, v in n.items():
-                if "referee" in _k(k) or "official" in _k(k):
+                if _k(k) in ("referee", "refereename"):
                     if isinstance(v, str) and v.strip():
                         return v.strip()
                     if isinstance(v, dict):
-                        nm = v.get("name") or v.get("fullName") or v.get("title")
+                        nm = v.get("name") or v.get("fullName")
                         if isinstance(nm, str) and nm.strip():
                             return nm.strip()
             for v in n.values():
@@ -153,33 +354,10 @@ def buscar_referee(data, prof_max=10):
         return None
     return walk(data)
 
-# Respaldo Sofascore
-def buscar_referee_sofascore(home, away, date_str):
-    try:
-        url = f"https://api.sofascore.com/api/v1/sport/football/scheduled-events/{date_str}"
-        r = http().get(url, timeout=15)
-        r.raise_for_status()
-        eventos = r.json().get("events", [])
-        event_id = None
-        for ev in eventos:
-            if (ev.get("homeTeam", {}).get("name") == home and
-                ev.get("awayTeam", {}).get("name") == away):
-                event_id = ev.get("id")
-                break
-        if not event_id:
-            return None
-        url_det = f"https://api.sofascore.com/api/v1/event/{event_id}"
-        r2 = http().get(url_det, timeout=15)
-        r2.raise_for_status()
-        data = r2.json().get("event", {})
-        ref = data.get("referee", {})
-        if isinstance(ref, dict):
-            return ref.get("name")
-        return None
-    except Exception:
-        return None
 
 def parse_cards(data, match_id, league_id, date, home, away):
+    """Devuelve dos filas (home, away) con tarjetas + arbitro, o [] si no
+    se pudo extraer nada (partido queda marcado con error para revisar)."""
     red_h = dig(data, "header", "status", "numberOfHomeRedCards")
     red_w = dig(data, "header", "status", "numberOfAwayRedCards")
     eventos = dig(data, "content", "matchFacts", "events", "events") or []
@@ -205,6 +383,8 @@ def parse_cards(data, match_id, league_id, date, home, away):
             elif is_home is False:
                 segunda_w += 1
 
+    # Si por algun motivo no vino el conteo de header.status, usamos lo
+    # que se pudo contar de los eventos (rojas directas + segundas).
     if red_h is None or red_w is None:
         rojas_directas_h = sum(1 for e in eventos if isinstance(e, dict)
                                and _k(e.get("card") or "") == "red" and e.get("isHome"))
@@ -214,10 +394,10 @@ def parse_cards(data, match_id, league_id, date, home, away):
         red_w = (red_w if red_w is not None else rojas_directas_w + segunda_w)
 
     referee = buscar_referee(data)
-    if not referee:
-        referee = buscar_referee_sofascore(home, away, date)
-
     fuente = "eventos+status"
+
+    # Mercado "total de tarjetas": amarilla=1, roja=2 (incluye directas y
+    # las que salen de una segunda amarilla).
     total_h = yellow_h * 1 + red_h * 2
     total_w = yellow_w * 1 + red_w * 2
 
@@ -231,6 +411,44 @@ def parse_cards(data, match_id, league_id, date, home, away):
          "second_yellow": int(segunda_w), "total_cards": total_w,
          "referee": referee, "fuente": fuente},
     ]
+
+
+def inspeccionar(match_id):
+    """Igual que en remates_v10: mapa de la estructura real del JSON,
+    para poder ajustar CLAVES_AMARILLA/CLAVES_ROJA si no matchean."""
+    data = api("matchDetails", matchId=match_id)
+
+    def mapa(n, prof=0, camino=""):
+        out = []
+        if prof > 3:
+            return out
+        if isinstance(n, dict):
+            for k, v in list(n.items())[:22]:
+                c = f"{camino}.{k}" if camino else k
+                if isinstance(v, dict):
+                    out.append(f"{c} {{{len(v)} claves}}")
+                    out += mapa(v, prof + 1, c)
+                elif isinstance(v, list):
+                    out.append(f"{c} [lista de {len(v)}]")
+                    if v and isinstance(v[0], dict):
+                        out.append(f"  {c}[0] claves: "
+                                   + ", ".join(list(v[0].keys())[:14]))
+                        out += mapa(v[0], prof + 2, c + "[0]")
+                else:
+                    out.append(f"{c} = {str(v)[:45]}")
+        return out
+
+    home = dig(data, "general", "homeTeam", "name") or "?"
+    away = dig(data, "general", "awayTeam", "name") or "?"
+    filas = parse_cards(data, match_id, None, None, home, away)
+    return {
+        "partido": f"{home} vs {away}",
+        "extraidas": filas,
+        "estructura": mapa(data)[:150],
+    }
+
+
+# ======================= ACTUALIZACION ==================================
 
 def update_fixtures(dias=180, quiet=False):
     db_init()
@@ -246,15 +464,9 @@ def update_fixtures(dias=180, quiet=False):
             continue
         rows = []
         for lg in data.get("leagues", []):
-            # CORRECCIÓN: Usar primaryId o parentLeagueId
-            lid = lg.get("primaryId") or lg.get("id") or lg.get("parentLeagueId")
-            # Si el id encontrado no es 112 pero su padre es 112, usar 112
+            lid = lg.get("primaryId") or lg.get("id")
             if lid not in LIGAS:
-                parent = lg.get("parentLeagueId")
-                if parent in LIGAS:
-                    lid = parent
-                else:
-                    continue
+                continue
             for m in lg.get("matches", []):
                 if not dig(m, "status", "finished", default=False):
                     continue
@@ -272,6 +484,7 @@ def update_fixtures(dias=180, quiet=False):
             print(f"  {day} ... {nuevos} nuevos acumulados")
     print(f"\nFixtures: {nuevos} partidos nuevos guardados.")
     return nuevos
+
 
 def process_matches(limite=600):
     db_init()
@@ -323,43 +536,52 @@ def process_matches(limite=600):
         print("\n  Cortado. Lo procesado quedo guardado.")
     print(f"\nOK {ok} | errores {err}")
 
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--update", action="store_true", help="trae fixtures y procesa tarjetas")
+    ap.add_argument("--update", action="store_true",
+                    help="trae fixtures y procesa tarjetas")
     ap.add_argument("--fixtures", action="store_true", help="solo fixtures")
     ap.add_argument("--procesar", action="store_true", help="solo procesar")
-    ap.add_argument("--inspeccionar", type=int, metavar="MATCH_ID", help="vuelca estructura del JSON de un partido")
-    ap.add_argument("--reset-tarjetas", action="store_true", help="borra team_cards y marca todo para reprocesar")
+    ap.add_argument("--inspeccionar", type=int, metavar="MATCH_ID",
+                    help="vuelca estructura del JSON de un partido")
+    ap.add_argument("--reset-tarjetas", action="store_true",
+                    help="borra team_cards y marca todo para reprocesar "
+                         "(usalo una vez tras actualizar el extractor)")
+    ap.add_argument("--arbitros", action="store_true",
+                    help="solo actualiza los arbitros designados de la LPF")
     ap.add_argument("--dias", type=int, default=365)
     a = ap.parse_args()
     db_init()
+
+    if a.arbitros:
+        actualizar_arbitros()
+        return
     if a.reset_tarjetas:
         with cx() as c:
             n = c.execute("SELECT COUNT(*) FROM team_cards").fetchone()[0]
             c.execute("DELETE FROM team_cards")
             c.execute("UPDATE matches SET processed=0, error=NULL")
-        print(f"Borradas {n} filas. Corre: python cards_data.py --procesar")
+        print(f"Borradas {n} filas de team_cards. Todos los partidos "
+              f"quedaron marcados para reprocesar.\nCorre ahora: "
+              f"python cards_data.py --procesar")
         return
     if a.inspeccionar:
-        import json
-        out = {
-            "partido": "Test",
-            "extraidas": [],
-            "estructura": []
-        }
-        data = api("matchDetails", matchId=a.inspeccionar)
-        home = dig(data, "general", "homeTeam", "name") or "?"
-        away = dig(data, "general", "awayTeam", "name") or "?"
-        filas = parse_cards(data, a.inspeccionar, None, None, home, away)
-        out = {"partido": f"{home} vs {away}", "extraidas": filas}
+        out = inspeccionar(a.inspeccionar)
         print(json.dumps(out, ensure_ascii=False, indent=2)[:6000])
         return
     if a.fixtures or a.update:
         update_fixtures(a.dias)
     if a.procesar or a.update:
         process_matches()
+    if a.update:
+        try:
+            actualizar_arbitros()
+        except Exception as e:
+            print(f"  [arbitros] fallo sin frenar el resto: {e}")
     if not any([a.fixtures, a.procesar, a.update, a.inspeccionar]):
         print(__doc__)
+
 
 if __name__ == "__main__":
     try:
