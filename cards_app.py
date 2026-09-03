@@ -62,21 +62,40 @@ def liga_media():
     return r[0] or 4.5
 
 
-def team_lambda(team, rival=None, n_recientes=15):
+def arbitro_promedio(arbitro):
+    """Promedio de tarjetas TOTALES del partido (ambos equipos) en los
+    partidos historicos que dirigio este arbitro, y cuantos son."""
+    if not arbitro:
+        return None, 0
+    with cx() as c:
+        rows = c.execute(
+            "SELECT total_cards_partido FROM arbitro_historial "
+            "WHERE arbitro=?", (arbitro,)).fetchall()
+    if not rows:
+        return None, 0
+    vals = [r["total_cards_partido"] for r in rows]
+    return sum(vals) / len(vals), len(vals)
+
+
+def team_lambda(team, rival=None, es_local=None, arbitro=None, n_recientes=15):
     """Promedio de tarjetas propias del equipo, con mas peso a lo
     reciente y 'shrinkage' hacia la media de la liga si hay poca
-    muestra. Si se pasa 'rival', ajusta ademas por:
-      - que tan 'duro' es el rival (cuantas tarjetas sacan sus
-        oponentes cuando lo enfrentan), con peso limitado a 35%.
-      - el historial cabeza a cabeza entre estos dos equipos
-        puntuales, con peso limitado a 30% y solo si hay 2+ partidos
-        previos entre ellos.
+    muestra. Ajusta ademas por (cada uno con su peso maximo, para que
+    ninguno domine el numero final):
+      - local/visitante: si hay 3+ partidos en el mismo contexto,
+        se mezcla con el promedio general propio (peso maximo 45%).
+      - rival: que tan 'duro' es el rival de turno (peso maximo 35%).
+      - cabeza a cabeza (H2H): historial puntual contra este rival, si
+        hay 2+ antecedentes (peso maximo 30%).
+      - arbitro: promedio de tarjetas de los partidos que dirigio,
+        contra la media de la liga, si hay 3+ antecedentes de ese
+        arbitro (peso maximo 30%).
     Compara nombres normalizados (sin tildes) para que no se parta la
     muestra si FotMob guardo el mismo equipo con variantes de acento."""
     obj_team = _normalizar(team)
     with cx() as c:
         todas = c.execute(
-            "SELECT team, opponent, total_cards, date FROM team_cards "
+            "SELECT team, opponent, is_home, total_cards, date FROM team_cards "
             "ORDER BY date DESC").fetchall()
 
     propias = [r for r in todas if _normalizar(r["team"]) == obj_team]
@@ -93,7 +112,20 @@ def team_lambda(team, rival=None, n_recientes=15):
         lam_propio = w_confianza * prom_pond + (1 - w_confianza) * media_liga
 
     lam = lam_propio
-    info = {"ajuste_rival_pct": None, "h2h": None}
+    info = {"ajuste_rival_pct": None, "h2h": None,
+            "ajuste_local_pct": None, "ajuste_arbitro_pct": None}
+
+    if es_local is not None:
+        contexto = [r for r in propias
+                    if bool(r["is_home"]) == bool(es_local)][:n_recientes]
+        if len(contexto) >= 3:
+            pesos_c = [0.9 ** i for i in range(len(contexto))]
+            vals_c = [r["total_cards"] for r in contexto]
+            prom_ctx = sum(p * v for p, v in zip(pesos_c, vals_c)) / sum(pesos_c)
+            w_ctx = min(0.45, len(contexto) / 12.0)
+            lam_ajustado = lam * (1 - w_ctx) + prom_ctx * w_ctx
+            info["ajuste_local_pct"] = round((lam_ajustado / lam - 1) * 100, 1) if lam else 0
+            lam = lam_ajustado
 
     if rival:
         obj_rival = _normalizar(rival)
@@ -115,18 +147,30 @@ def team_lambda(team, rival=None, n_recientes=15):
             lam = lam * (1 - w_h2h) + h2h_prom * w_h2h
             info["h2h"] = {"partidos": len(h2h_rows), "promedio": round(h2h_prom, 2)}
 
+    if arbitro:
+        arb_prom, n_arb = arbitro_promedio(arbitro)
+        if arb_prom and n_arb >= 3 and media_liga > 0:
+            media_liga_partido = media_liga * 2  # aprox: partido = 2 equipos
+            factor_arb = max(0.7, min(1.4, arb_prom / media_liga_partido))
+            w_arb = min(1.0, n_arb / 8.0) * 0.30
+            lam_ajustado = lam * (1 + w_arb * (factor_arb - 1))
+            info["ajuste_arbitro_pct"] = round((lam_ajustado / lam - 1) * 100, 1) if lam else 0
+            lam = lam_ajustado
+
     return lam, n, info
 
 
 LINEAS = [4, 5, 6, 7, 8]
 
 
-def probas_equipo(team, rival=None):
-    lam, n, info = team_lambda(team, rival=rival)
+def probas_equipo(team, rival=None, es_local=None, arbitro=None):
+    lam, n, info = team_lambda(team, rival=rival, es_local=es_local, arbitro=arbitro)
     return {
         "equipo": team, "lambda": round(lam, 2), "muestra": n,
         "confiable": n >= 6,
         "ajuste_rival_pct": info["ajuste_rival_pct"],
+        "ajuste_local_pct": info["ajuste_local_pct"],
+        "ajuste_arbitro_pct": info["ajuste_arbitro_pct"],
         "h2h": info["h2h"],
         "under": {str(x): round(poisson_cdf(x - 1, lam) * 100, 1)
                   for x in LINEAS},
@@ -169,8 +213,9 @@ def api_proximos():
                          for r in c.execute("SELECT home, away, arbitro FROM arbitros_proximos")}
     out = []
     for p in proximos_partidos():
-        home_est = probas_equipo(p["home"], rival=p["away"])
-        away_est = probas_equipo(p["away"], rival=p["home"])
+        arbitro = arbitros_map.get((_normalizar(p["home"]), _normalizar(p["away"])))
+        home_est = probas_equipo(p["home"], rival=p["away"], es_local=True, arbitro=arbitro)
+        away_est = probas_equipo(p["away"], rival=p["home"], es_local=False, arbitro=arbitro)
         lam_total = home_est["lambda"] + away_est["lambda"]
         # Lineas mas altas para el total del partido, tiene sentido que
         # sea la suma de las de cada equipo.
@@ -180,7 +225,6 @@ def api_proximos():
             "under": {str(x): round(poisson_cdf(x - 1, lam_total) * 100, 1)
                       for x in LINEAS_TOTAL},
         }
-        arbitro = arbitros_map.get((_normalizar(p["home"]), _normalizar(p["away"])))
         out.append({**p, "home_est": home_est, "away_est": away_est,
                     "combinado": combinado, "arbitro": arbitro})
     return out
@@ -466,9 +510,17 @@ function avatar(nombre){
 function tarjetaEquipo(t){
   const u = t.under;
   let notas = '';
+  if(t.ajuste_local_pct !== null && t.ajuste_local_pct !== undefined && Math.abs(t.ajuste_local_pct) >= 1){
+    const signo = t.ajuste_local_pct >= 0 ? '+' : '';
+    notas += `<div class="nota">ajustado por local/visitante: ${signo}${t.ajuste_local_pct}%</div>`;
+  }
   if(t.ajuste_rival_pct !== null && t.ajuste_rival_pct !== undefined && Math.abs(t.ajuste_rival_pct) >= 1){
     const signo = t.ajuste_rival_pct >= 0 ? '+' : '';
     notas += `<div class="nota">ajustado por rival: ${signo}${t.ajuste_rival_pct}%</div>`;
+  }
+  if(t.ajuste_arbitro_pct !== null && t.ajuste_arbitro_pct !== undefined && Math.abs(t.ajuste_arbitro_pct) >= 1){
+    const signo = t.ajuste_arbitro_pct >= 0 ? '+' : '';
+    notas += `<div class="nota">ajustado por arbitro: ${signo}${t.ajuste_arbitro_pct}%</div>`;
   }
   if(t.h2h){
     notas += `<div class="nota">h2h vs este rival: ${t.h2h.partidos} partidos, prom. ${t.h2h.promedio}</div>`;

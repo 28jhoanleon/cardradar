@@ -82,6 +82,9 @@ CREATE TABLE IF NOT EXISTS cfg(k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS arbitros_proximos(
   home TEXT, away TEXT, arbitro TEXT, actualizado TEXT,
   PRIMARY KEY(home, away));
+CREATE TABLE IF NOT EXISTS arbitro_historial(
+  match_id INTEGER PRIMARY KEY, arbitro TEXT, home TEXT, away TEXT,
+  date TEXT, total_cards_partido REAL);
 """
 
 
@@ -250,6 +253,139 @@ def mapear_equipo_lpf(nombre_corto, nombres_db):
             if score > mejor_score:
                 mejor, mejor_score = db_name, score
     return mejor
+
+
+MESES = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5,
+    "junio": 6, "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9,
+    "octubre": 10, "noviembre": 11, "diciembre": 12,
+}
+
+_PATRON_FECHA = re.compile(
+    r"(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\s+"
+    r"(\d{1,2})\s+de\s+(\w+)", re.IGNORECASE)
+_PATRON_PARTIDO_LINEA = re.compile(
+    r"^\d{1,2}[:.]\d{2}\s+(.+?)\s*[–—-]\s*(.+?)(?:\s*\([^)]*\))*\s*$")
+_PATRON_ARBITRO_LINEA = re.compile(r"^[ÁA]rbitro:\s*(.+)$", re.IGNORECASE)
+
+
+def _parsear_bloque_arbitros(bloque, anio):
+    """Recorre el texto linea por linea llevando la fecha actual, y
+    devuelve (home_corto, away_corto, arbitro, fecha_iso) por cada
+    partido con arbitro asignado que encuentre."""
+    resultado = []
+    fecha_actual = None
+    pendiente = None
+    for linea in (l.strip() for l in bloque.split("\n") if l.strip()):
+        m_fecha = _PATRON_FECHA.search(linea)
+        if m_fecha:
+            dia = int(m_fecha.group(1))
+            mes = MESES.get(_normalizar(m_fecha.group(2)))
+            if mes:
+                fecha_actual = f"{anio}-{mes:02d}-{dia:02d}"
+            continue
+        m_partido = _PATRON_PARTIDO_LINEA.match(linea)
+        if m_partido:
+            pendiente = (m_partido.group(1).strip(), m_partido.group(2).strip(),
+                        fecha_actual)
+            continue
+        m_arb = _PATRON_ARBITRO_LINEA.match(linea)
+        if m_arb and pendiente:
+            home_corto, away_corto, fecha = pendiente
+            resultado.append((home_corto, away_corto, m_arb.group(1).strip(), fecha))
+            pendiente = None
+    return resultado
+
+
+def historial_arbitros_lpf(max_notas=8):
+    """Baja hasta max_notas notas de designaciones (la mas reciente y
+    las anteriores) y devuelve todas las designaciones encontradas,
+    con fecha. Para construir el promedio de tarjetas por arbitro."""
+    if BeautifulSoup is None:
+        print("  [historial arbitros] falta beautifulsoup4")
+        return []
+    try:
+        r = http().get("https://www.ligaprofesional.ar/categoria/arbitraje/",
+                        timeout=20)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"  [historial arbitros] no se pudo bajar la categoria: {e}")
+        return []
+
+    urls = re.findall(
+        r'https://www\.ligaprofesional\.ar/notas/arbitraje/[^\s"\'<>]+/', r.text)
+    urls = list(dict.fromkeys(urls))[:max_notas]
+    if not urls:
+        print("  [historial arbitros] no encontre notas en la categoria")
+        return []
+
+    todos = []
+    for url in urls:
+        m_anio = re.search(r"/arbitraje/(\d{4})/", url)
+        anio = int(m_anio.group(1)) if m_anio else datetime.now().year
+        try:
+            r2 = http().get(url, timeout=20)
+            r2.raise_for_status()
+        except Exception as e:
+            print(f"  [historial arbitros] fallo {url}: {e}")
+            continue
+        soup = BeautifulSoup(r2.text, "html.parser")
+        texto = soup.get_text("\n")
+        ini = texto.find("Designaciones arbitrales")
+        if ini == -1:
+            ini = texto.find("Autoridades")
+        fin = texto.find("Últimas noticias")
+        if ini == -1:
+            ini = 0
+        if fin == -1:
+            fin = len(texto)
+        bloque = texto[ini:fin]
+        entradas = _parsear_bloque_arbitros(bloque, anio)
+        todos.extend(entradas)
+        print(f"  [historial arbitros] {url.rstrip('/').split('/')[-1][:40]}: "
+              f"{len(entradas)} designaciones")
+    return todos
+
+
+def actualizar_historial_arbitros(max_notas=8):
+    """Matchea las designaciones historicas contra partidos que YA
+    tenemos jugados y procesados, y guarda cuantas tarjetas hubo en
+    cada uno, agrupable despues por arbitro."""
+    entradas = historial_arbitros_lpf(max_notas)
+    if not entradas:
+        return 0
+    with cx() as c:
+        nombres_db = [r[0] for r in c.execute(
+            "SELECT DISTINCT home FROM matches UNION "
+            "SELECT DISTINCT away FROM matches")]
+    guardados = 0
+    with cx() as c:
+        for home_corto, away_corto, arbitro, fecha in entradas:
+            if not fecha:
+                continue
+            home_db = mapear_equipo_lpf(home_corto, nombres_db)
+            away_db = mapear_equipo_lpf(away_corto, nombres_db)
+            if not home_db or not away_db:
+                continue
+            fila = c.execute(
+                "SELECT match_id FROM matches WHERE home=? AND away=? "
+                "AND date BETWEEN date(?, '-1 day') AND date(?, '+1 day')",
+                (home_db, away_db, fecha, fecha)).fetchone()
+            if not fila:
+                continue
+            match_id = fila["match_id"]
+            tot = c.execute(
+                "SELECT SUM(total_cards) AS total FROM team_cards "
+                "WHERE match_id=?", (match_id,)).fetchone()
+            if not tot or tot["total"] is None:
+                continue
+            c.execute(
+                "INSERT OR REPLACE INTO arbitro_historial VALUES (?,?,?,?,?,?)",
+                (match_id, arbitro, home_db, away_db, fecha, tot["total"]))
+            guardados += 1
+    print(f"\nHistorial de arbitros: {guardados}/{len(entradas)} "
+          f"designaciones matcheadas contra partidos jugados")
+    return guardados
 
 
 def obtener_arbitros_lpf():
@@ -553,10 +689,16 @@ def main():
                          "(usalo una vez tras actualizar el extractor)")
     ap.add_argument("--arbitros", action="store_true",
                     help="solo actualiza los arbitros designados de la LPF")
+    ap.add_argument("--historial-arbitros", action="store_true",
+                    help="baja notas viejas de designaciones y arma el "
+                         "promedio de tarjetas por arbitro (mas lento)")
     ap.add_argument("--dias", type=int, default=365)
     a = ap.parse_args()
     db_init()
 
+    if a.historial_arbitros:
+        actualizar_historial_arbitros(max_notas=10)
+        return
     if a.arbitros:
         actualizar_arbitros()
         return
