@@ -237,8 +237,9 @@ body{margin:0;background:var(--bg);color:var(--text);
   font-family:var(--f-body);
   padding:16px 14px 200px}
 h1{font-family:var(--f-body);font-size:22px;margin:0 0 4px;font-weight:700}
-.hero{border-radius:14px;padding:18px 16px;margin-bottom:16px;
-  background:var(--card);border-left:3px solid var(--accent)}
+.hero{border-radius:14px;padding:20px 16px;margin-bottom:16px;
+  background:linear-gradient(135deg, rgba(240,180,41,.10) 0%, var(--card) 55%);
+  border-left:3px solid var(--accent)}
 .hero .sub{color:var(--mut)}
 .sub{color:var(--mut);font-size:13px;margin-bottom:6px}
 .match{background:var(--card);border:1px solid var(--line);
@@ -352,9 +353,21 @@ function calcularEdge(){
     <div class="total-row"><span>Diferencia (edge)</span><span class="pct ${edge>=0?'hi':'lo'}">${edge>=0?'+':''}${edge.toFixed(1)}%</span></div>`;
 }
 function mejorApuesta(p){
-  // Elige la pata mas representativa para el resumen colapsado: entre
-  // las lineas 4/5/6 de cada equipo, la de mayor probabilidad,
-  // priorizando equipos con muestra confiable.
+  // Prioriza el TOTAL del partido (lo que mas se apuesta en la
+  // practica), buscando la linea mas baja que aun asi tenga
+  // confianza razonable (mejor cuota, sigue siendo probable).
+  const lineasTotal = ['6','7','8','9'];
+  for(const x of lineasTotal){
+    if(p.combinado.under[x] !== undefined && p.combinado.under[x] >= 65){
+      return {
+        texto: `Menos de ${x} tarjetas en total`,
+        prob: p.combinado.under[x],
+        clase: clase(p.combinado.under[x]),
+      };
+    }
+  }
+  // Fallback: si el total no tiene ninguna linea confiable, usamos la
+  // mejor pata por equipo.
   const candidatas = [];
   [p.home_est, p.away_est].forEach(t=>{
     ['5','6','4'].forEach(x=>{
@@ -385,37 +398,32 @@ function sugerirCombinada(){
   vaciarCombinada();
   const candidatas = [];
   datosGlobales.forEach(p=>{
-    [p.home_est, p.away_est].forEach(t=>{
-      // Evitamos las lineas obvias (menos de 7/8, que casi siempre dan
-      // altisimo) y priorizamos 4/5/6, que es donde el mercado real
-      // paga mejor cuota. Preferimos la de mayor probabilidad entre
-      // esas.
-      ['5','6','4'].forEach(x=>{
-        if(t.under && t.under[x] !== undefined){
-          candidatas.push({
-            texto: `${t.equipo} - Menos de ${x}`,
-            prob: t.under[x],
-            equipo: t.equipo,
-            confiable: t.confiable,
-          });
-        }
-      });
-    });
+    // Una pata por partido, sobre el TOTAL combinado (lo que mas se
+    // apuesta en la practica). Buscamos la linea mas baja que siga
+    // siendo confiable, asi la cuota vale la pena.
+    const lineas = ['6','7','8','9'];
+    let elegida = null;
+    for(const x of lineas){
+      if(p.combinado.under[x] !== undefined && p.combinado.under[x] >= 60){
+        elegida = {texto: `${p.home} vs ${p.away} - Menos de ${x} en total`,
+                   prob: p.combinado.under[x],
+                   confiable: p.home_est.confiable && p.away_est.confiable};
+        break;
+      }
+    }
+    if(elegida) candidatas.push(elegida);
   });
-  // primero las de equipo con muestra confiable, despues por probabilidad
+  // primero los partidos con muestra confiable en ambos equipos,
+  // despues por probabilidad
   candidatas.sort((a,b)=> (b.confiable - a.confiable) || (b.prob - a.prob));
-  const usados = new Set();
   let agregadas = 0;
   for(const c of candidatas){
-    if(usados.has(c.equipo)) continue;
-    if(c.prob < 55) continue;  // no sugerimos patas de moneda al aire
-    usados.add(c.equipo);
     combinada.push({texto: c.texto, prob: c.prob});
     agregadas++;
     if(agregadas >= 6) break;
   }
   if(!agregadas){
-    alert('No encontre suficientes equipos con muestra confiable todavia '+
+    alert('No encontre suficientes partidos con muestra confiable todavia '+
           'para armar una sugerencia. Segui cargando historial.');
     return;
   }
@@ -442,6 +450,19 @@ function renderCombinada(){
   calcularEdge();
 }
 
+const PALETA_EQUIPOS = ['#f0725e','#f0b429','#4ade80','#38bdf8','#a78bfa',
+                         '#f472b6','#fb923c','#2dd4bf'];
+function avatar(nombre){
+  let hash = 0;
+  for(let i=0;i<nombre.length;i++) hash = (hash*31 + nombre.charCodeAt(i)) >>> 0;
+  const color = PALETA_EQUIPOS[hash % PALETA_EQUIPOS.length];
+  const iniciales = nombre.split(' ').filter(w=>w.length>2 || w===nombre.split(' ')[0])
+    .slice(0,2).map(w=>w[0]).join('').toUpperCase().slice(0,2) || nombre.slice(0,2).toUpperCase();
+  return `<span style="display:inline-flex;align-items:center;justify-content:center;
+    width:22px;height:22px;border-radius:50%;background:${color}22;
+    color:${color};font-size:10px;font-weight:700;flex-shrink:0;
+    border:1px solid ${color}55">${iniciales}</span>`;
+}
 function tarjetaEquipo(t){
   const u = t.under;
   let notas = '';
@@ -453,7 +474,9 @@ function tarjetaEquipo(t){
     notas += `<div class="nota">h2h vs este rival: ${t.h2h.partidos} partidos, prom. ${t.h2h.promedio}</div>`;
   }
   return `<div class="team">
-    <div class="tname">${t.equipo}</div>
+    <div class="tname" style="display:flex;align-items:center;gap:6px">
+      ${avatar(t.equipo)}<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.equipo}</span>
+    </div>
     <div class="tsamp">${t.muestra} partidos en base${t.confiable?'':' - muestra chica'}</div>
     <div class="lam">prom. esperado: ${t.lambda} tarjetas</div>
     ${notas}
@@ -481,12 +504,14 @@ async function cargar(){
       <div class="match">
         <div class="mhead" onclick="toggleMatch(${i})">
           <div class="mteams">
-            <span class="tt">${p.home} <span style="color:var(--mut);font-weight:400">vs</span> ${p.away}</span>
+            <span class="tt" style="display:flex;align-items:center;gap:6px">
+              ${avatar(p.home)}${p.home} <span style="color:var(--mut);font-weight:400">vs</span> ${p.away}${avatar(p.away)}
+            </span>
             <span class="chevron" id="chev-${i}">&#9662;</span>
           </div>
           <div class="mmeta">${p.fecha}${p.arbitro ? ' &middot; \u26AB ' + p.arbitro : ''}</div>
           <div class="mbest">
-            <span class="mbest-txt">Mejor dato: ${mejor.texto}</span>
+            <span class="mbest-txt">Pick recomendado: ${mejor.texto}</span>
             <span class="pctwrap"><span class="chip ${mejor.clase}"></span><span class="pct ${mejor.clase}">${mejor.prob}%</span></span>
           </div>
         </div>
