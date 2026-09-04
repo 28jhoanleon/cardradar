@@ -62,6 +62,24 @@ def liga_media():
     return r[0] or 4.5
 
 
+# Curada a mano, no calculada. Solo los clasicos "grandes" de equipos
+# que estan en la Liga Profesional esta temporada, para no arriesgar
+# con rivalidades dudosas o equipos que ya no estan en primera.
+CLASICOS = [
+    frozenset({"boca juniors", "river plate"}),
+    frozenset({"racing club", "independiente"}),
+    frozenset({"rosario central", "newells old boys"}),
+    frozenset({"estudiantes", "gimnasia lp"}),
+    frozenset({"talleres", "belgrano"}),
+    frozenset({"independiente rivadavia", "gimnasia mendoza"}),
+]
+
+
+def es_clasico(team, rival):
+    par = frozenset({_normalizar(team), _normalizar(rival)})
+    return par in CLASICOS
+
+
 def arbitro_promedio(arbitro):
     """Promedio de tarjetas TOTALES del partido (ambos equipos) en los
     partidos historicos que dirigio este arbitro, y cuantos son."""
@@ -113,7 +131,8 @@ def team_lambda(team, rival=None, es_local=None, arbitro=None, n_recientes=15):
 
     lam = lam_propio
     info = {"ajuste_rival_pct": None, "h2h": None,
-            "ajuste_local_pct": None, "ajuste_arbitro_pct": None}
+            "ajuste_local_pct": None, "ajuste_arbitro_pct": None,
+            "es_clasico": False}
 
     if es_local is not None:
         contexto = [r for r in propias
@@ -157,6 +176,10 @@ def team_lambda(team, rival=None, es_local=None, arbitro=None, n_recientes=15):
             info["ajuste_arbitro_pct"] = round((lam_ajustado / lam - 1) * 100, 1) if lam else 0
             lam = lam_ajustado
 
+    if rival and es_clasico(team, rival):
+        lam = lam * 1.12
+        info["es_clasico"] = True
+
     return lam, n, info
 
 
@@ -171,6 +194,7 @@ def probas_equipo(team, rival=None, es_local=None, arbitro=None):
         "ajuste_rival_pct": info["ajuste_rival_pct"],
         "ajuste_local_pct": info["ajuste_local_pct"],
         "ajuste_arbitro_pct": info["ajuste_arbitro_pct"],
+        "es_clasico": info["es_clasico"],
         "h2h": info["h2h"],
         "under": {str(x): round(poisson_cdf(x - 1, lam) * 100, 1)
                   for x in LINEAS},
@@ -522,6 +546,9 @@ function tarjetaEquipo(t){
     const signo = t.ajuste_arbitro_pct >= 0 ? '+' : '';
     notas += `<div class="nota">ajustado por arbitro: ${signo}${t.ajuste_arbitro_pct}%</div>`;
   }
+  if(t.es_clasico){
+    notas += `<div class="nota">&#9889; clasico: +12% (ajuste fijo, no calculado)</div>`;
+  }
   if(t.h2h){
     notas += `<div class="nota">h2h vs este rival: ${t.h2h.partidos} partidos, prom. ${t.h2h.promedio}</div>`;
   }
@@ -591,6 +618,52 @@ async function cargar(){
 }
 cargar();
 </script>
+<details style="margin-top:24px;color:var(--mut)">
+  <summary style="cursor:pointer;font-size:12px">&#9881;&#65039; Admin (actualizar datos manualmente)</summary>
+  <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+    <div style="font-size:11px;line-height:1.5">
+      Estos botones piden tu clave de admin (la que pusiste en Railway como
+      <code>ADMIN_TOKEN</code>) y disparan la tarea en el servidor, en segundo
+      plano. Mirá los logs de Railway para ver el progreso.
+    </div>
+    <button onclick="adminRun('todo')" style="padding:8px 12px;border-radius:8px;
+      border:1px solid var(--line);background:var(--card2);color:var(--text);
+      font-size:12px;text-align:left;cursor:pointer">
+      <b>Actualizar todo</b> - backfill completo + arbitros + historial.
+      Usalo despues de un cambio grande, o si ves la base vacia. Tarda ~20 min.
+    </button>
+    <button onclick="adminRun('arbitros')" style="padding:8px 12px;border-radius:8px;
+      border:1px solid var(--line);background:var(--card2);color:var(--text);
+      font-size:12px;text-align:left;cursor:pointer">
+      <b>Solo arbitros de la proxima fecha</b> - rapido. Usalo cada vez que
+      la LPF publique una nota nueva de designaciones (una vez por semana).
+    </button>
+    <button onclick="adminRun('historial-arbitros')" style="padding:8px 12px;border-radius:8px;
+      border:1px solid var(--line);background:var(--card2);color:var(--text);
+      font-size:12px;text-align:left;cursor:pointer">
+      <b>Historial de arbitros</b> - baja notas viejas para ir armando el
+      promedio de tarjetas por arbitro. Usalo cada tanto para sumar mas datos.
+    </button>
+    <div id="admin-resultado" style="font-size:11px;margin-top:4px"></div>
+  </div>
+</details>
+<script>
+async function adminRun(tarea){
+  const token = prompt('Clave de admin (ADMIN_TOKEN de Railway):');
+  if(!token) return;
+  const out = document.getElementById('admin-resultado');
+  out.textContent = 'Enviando...';
+  try{
+    const r = await fetch(`/admin/run?tarea=${tarea}&token=${encodeURIComponent(token)}`);
+    const data = await r.json();
+    out.textContent = r.ok
+      ? `OK: ${data.status} (tarea: ${data.tarea})`
+      : `Error: ${data.error}`;
+  }catch(e){
+    out.textContent = 'Error de red: ' + e;
+  }
+}
+</script>
 </body></html>"""
 
 
@@ -608,7 +681,46 @@ async def r_stats(request):
     with cx() as c:
         n_m = c.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
         n_tc = c.execute("SELECT COUNT(*) FROM team_cards").fetchone()[0]
-    return JSONResponse({"partidos": n_m, "filas_tarjetas": n_tc})
+        n_arb = c.execute("SELECT COUNT(*) FROM arbitro_historial").fetchone()[0]
+    return JSONResponse({"partidos": n_m, "filas_tarjetas": n_tc,
+                         "partidos_con_arbitro_historico": n_arb})
+
+
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
+
+
+async def r_admin(request):
+    token = request.query_params.get("token")
+    tarea = request.query_params.get("tarea", "")
+    if not ADMIN_TOKEN:
+        return JSONResponse(
+            {"error": "Falta configurar la variable ADMIN_TOKEN en Railway "
+                      "para poder usar este endpoint."}, status_code=403)
+    if token != ADMIN_TOKEN:
+        return JSONResponse({"error": "no autorizado"}, status_code=403)
+
+    def hacer_todo():
+        update_fixtures(dias=365, quiet=True)
+        process_matches(limite=99999)
+        actualizar_arbitros()
+        actualizar_historial_arbitros(max_notas=10)
+
+    tareas = {
+        "fixtures": lambda: update_fixtures(dias=365, quiet=True),
+        "procesar": lambda: process_matches(limite=99999),
+        "arbitros": actualizar_arbitros,
+        "historial-arbitros": lambda: actualizar_historial_arbitros(max_notas=10),
+        "todo": hacer_todo,
+    }
+    fn = tareas.get(tarea)
+    if not fn:
+        return JSONResponse(
+            {"error": f"tarea desconocida. Usa una de: {list(tareas.keys())}"},
+            status_code=400)
+    threading.Thread(target=fn, daemon=True).start()
+    return JSONResponse({"status": "corriendo en background, mira los logs "
+                                    "de Railway para ver el progreso",
+                         "tarea": tarea})
 
 
 from contextlib import asynccontextmanager
@@ -626,6 +738,7 @@ app = Starlette(
         Route("/", home),
         Route("/api/proximos", r_proximos),
         Route("/api/stats", r_stats),
+        Route("/admin/run", r_admin),
     ],
     lifespan=lifespan,
 )
