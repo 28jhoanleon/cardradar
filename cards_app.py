@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cards_data import (api, dig, LIGAS, cx, db_init, update_fixtures,
                          process_matches, _normalizar, actualizar_arbitros,
-                         actualizar_historial_arbitros)
+                         actualizar_historial_arbitros, diagnosticar_nota_vieja)
 
 try:
     from starlette.applications import Starlette
@@ -229,6 +229,8 @@ def proximos_partidos(dias=7):
                     "fecha": day.isoformat(),
                     "home": dig(m, "home", "name"),
                     "away": dig(m, "away", "name"),
+                    "home_id": dig(m, "home", "id"),
+                    "away_id": dig(m, "away", "id"),
                     "liga": LIGAS[lid],
                 })
     return out
@@ -243,6 +245,8 @@ def api_proximos():
         arbitro = arbitros_map.get((_normalizar(p["home"]), _normalizar(p["away"])))
         home_est = probas_equipo(p["home"], rival=p["away"], es_local=True, arbitro=arbitro)
         away_est = probas_equipo(p["away"], rival=p["home"], es_local=False, arbitro=arbitro)
+        home_est["id"] = p.get("home_id")
+        away_est["id"] = p.get("away_id")
         lam_total = home_est["lambda"] + away_est["lambda"]
         # Lineas mas altas para el total del partido, tiene sentido que
         # sea la suma de las de cada equipo.
@@ -523,16 +527,26 @@ function renderCombinada(){
 
 const PALETA_EQUIPOS = ['#f0725e','#f0b429','#4ade80','#38bdf8','#a78bfa',
                          '#f472b6','#fb923c','#2dd4bf'];
-function avatar(nombre){
+function avatar(nombre, id){
   let hash = 0;
   for(let i=0;i<nombre.length;i++) hash = (hash*31 + nombre.charCodeAt(i)) >>> 0;
   const color = PALETA_EQUIPOS[hash % PALETA_EQUIPOS.length];
   const iniciales = nombre.split(' ').filter(w=>w.length>2 || w===nombre.split(' ')[0])
     .slice(0,2).map(w=>w[0]).join('').toUpperCase().slice(0,2) || nombre.slice(0,2).toUpperCase();
-  return `<span style="display:inline-flex;align-items:center;justify-content:center;
+  const circulo = `<span class="av-fallback" style="display:inline-flex;align-items:center;justify-content:center;
     width:22px;height:22px;border-radius:50%;background:${color}22;
     color:${color};font-size:10px;font-weight:700;flex-shrink:0;
     border:1px solid ${color}55">${iniciales}</span>`;
+  if(!id) return circulo;
+  return `<span style="display:inline-flex;width:22px;height:22px;flex-shrink:0;position:relative">
+    <img src="https://images.fotmob.com/image_resources/logo/teamlogo/${id}.png"
+      alt="" style="width:100%;height:100%;object-fit:contain"
+      onerror="this.style.display='none';this.nextElementSibling.style.display='inline-flex'">
+    <span class="av-fallback" style="display:none;align-items:center;justify-content:center;
+      width:22px;height:22px;border-radius:50%;background:${color}22;
+      color:${color};font-size:10px;font-weight:700;flex-shrink:0;
+      border:1px solid ${color}55">${iniciales}</span>
+  </span>`;
 }
 function tarjetaEquipo(t){
   const u = t.under;
@@ -557,7 +571,7 @@ function tarjetaEquipo(t){
   }
   return `<div class="team">
     <div class="tname" style="display:flex;align-items:center;gap:6px">
-      ${avatar(t.equipo)}<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.equipo}</span>
+      ${avatar(t.equipo, t.id)}<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.equipo}</span>
     </div>
     <div class="tsamp">${t.muestra} partidos en base${t.confiable?'':' - muestra chica'}</div>
     <div class="lam">prom. esperado: ${t.lambda} tarjetas</div>
@@ -587,7 +601,7 @@ async function cargar(){
         <div class="mhead" onclick="toggleMatch(${i})">
           <div class="mteams">
             <span class="tt" style="display:flex;align-items:center;gap:6px">
-              ${avatar(p.home)}${p.home} <span style="color:var(--mut);font-weight:400">vs</span> ${p.away}${avatar(p.away)}
+              ${avatar(p.home, p.home_id)}${p.home} <span style="color:var(--mut);font-weight:400">vs</span> ${p.away}${avatar(p.away, p.away_id)}
             </span>
             <span class="chevron" id="chev-${i}">&#9662;</span>
           </div>
@@ -646,6 +660,12 @@ cargar();
       font-size:12px;text-align:left;cursor:pointer">
       <b>Historial de arbitros</b> - baja notas viejas para ir armando el
       promedio de tarjetas por arbitro. Usalo cada tanto para sumar mas datos.
+    </button>
+    <button onclick="adminRun('diagnostico-arbitros')" style="padding:8px 12px;border-radius:8px;
+      border:1px solid var(--line);background:var(--card2);color:var(--text);
+      font-size:12px;text-align:left;cursor:pointer">
+      <b>Diagnostico de arbitros</b> - solo para depurar, muestra el texto
+      crudo de una nota vieja. Usalo si "Historial de arbitros" da 0.
     </button>
     <div id="admin-resultado" style="font-size:11px;margin-top:4px"></div>
   </div>
@@ -778,6 +798,7 @@ async def r_admin(request):
         "procesar": lambda: process_matches(limite=99999),
         "arbitros": actualizar_arbitros,
         "historial-arbitros": lambda: actualizar_historial_arbitros(max_notas=10),
+        "diagnostico-arbitros": diagnosticar_nota_vieja,
         "todo": hacer_todo,
     }
     fn = tareas.get(tarea)

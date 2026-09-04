@@ -323,6 +323,51 @@ def _parsear_bloque_arbitros(bloque, anio):
     return resultado
 
 
+def diagnosticar_nota_vieja():
+    """Baja la primera nota vieja de tipo 'autoridades-de-la-fecha' que
+    encuentre (no la de esta semana) y muestra el texto crudo tal cual
+    lo ve el parser, para poder ajustar las regex si hace falta."""
+    if BeautifulSoup is None:
+        print("falta beautifulsoup4")
+        return
+    r = http().get("https://www.ligaprofesional.ar/categoria/arbitraje/", timeout=20)
+    r.raise_for_status()
+    urls = re.findall(
+        r'https://www\.ligaprofesional\.ar/notas/arbitraje/[^\s"\'<>]+/', r.text)
+    urls = list(dict.fromkeys(urls))
+    url_vieja = next((u for u in urls if "autoridades-de-la-fecha" in u), None)
+    if not url_vieja:
+        print("no encontre ninguna nota vieja tipo 'autoridades-de-la-fecha'")
+        return
+    print(f"Probando: {url_vieja}")
+    r2 = http().get(url_vieja, timeout=20)
+    r2.raise_for_status()
+    soup = BeautifulSoup(r2.text, "html.parser")
+    texto = soup.get_text("\n")
+    ini = texto.find("Designaciones arbitrales")
+    if ini == -1:
+        ini = texto.find("Autoridades")
+    fin = texto.find("Últimas noticias")
+    if ini == -1:
+        ini = 0
+    if fin == -1:
+        fin = len(texto)
+    bloque = texto[ini:fin]
+    print(f"\nlargo del bloque: {len(bloque)} caracteres")
+    print("\n===== primeros 1500 caracteres (repr, para ver saltos de linea reales) =====")
+    print(repr(bloque[:1500]))
+    print("\n===== fechas que encuentra el patron de fecha =====")
+    fechas_encontradas = list(_PATRON_FECHA.finditer(bloque))
+    print(f"{len(fechas_encontradas)} fechas encontradas")
+    for m in fechas_encontradas[:5]:
+        print(" -", m.group(0))
+    print("\n===== partidos que encuentra el patron inline =====")
+    partidos_encontrados = list(_PATRON_FIXTURE_INLINE.finditer(bloque))
+    print(f"{len(partidos_encontrados)} partidos encontrados")
+    for m in partidos_encontrados[:3]:
+        print(" -", m.group(0)[:150])
+
+
 def historial_arbitros_lpf(max_notas=8):
     """Baja hasta max_notas notas de designaciones (la mas reciente y
     las anteriores) y devuelve todas las designaciones encontradas,
