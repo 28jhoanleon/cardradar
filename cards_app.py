@@ -22,16 +22,19 @@ no lo dejes corriendo en background en Railway):
     python cards_app.py --backfill
 En Railway podes hacerlo con:  railway run python cards_app.py --backfill
 """
+import contextlib
 import math
 import os
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cards_data import (api, dig, LIGAS, cx, db_init, update_fixtures,
-                         process_matches, _normalizar, actualizar_arbitros)
+                         process_matches, _normalizar, actualizar_arbitros,
+                         actualizar_historial_arbitros)
 
 try:
     from starlette.applications import Starlette
@@ -648,6 +651,7 @@ cargar();
   </div>
 </details>
 <script>
+let adminPolling = null;
 async function adminRun(tarea){
   const token = prompt('Clave de admin (ADMIN_TOKEN de Railway):');
   if(!token) return;
@@ -656,11 +660,47 @@ async function adminRun(tarea){
   try{
     const r = await fetch(`/admin/run?tarea=${tarea}&token=${encodeURIComponent(token)}`);
     const data = await r.json();
-    out.textContent = r.ok
-      ? `OK: ${data.status} (tarea: ${data.tarea})`
-      : `Error: ${data.error}`;
+    if(!r.ok){ out.textContent = 'Error: ' + data.error; return; }
+    if(adminPolling) clearInterval(adminPolling);
+    adminPoll(token);
+    adminPolling = setInterval(()=>adminPoll(token), 2000);
   }catch(e){
     out.textContent = 'Error de red: ' + e;
+  }
+}
+async function adminPoll(token){
+  const out = document.getElementById('admin-resultado');
+  try{
+    const r = await fetch(`/admin/estado?token=${encodeURIComponent(token)}`);
+    const d = await r.json();
+    const badge = d.estado==='corriendo' ? '&#128993; Corriendo...'
+                : d.estado==='listo' ? '&#128994; Listo'
+                : d.estado==='error' ? '&#128308; Error'
+                : d.estado;
+    out.innerHTML = `<div style="margin-bottom:6px"><b>${badge}</b>${d.tarea ? ' ('+d.tarea+')' : ''}</div>
+      <pre id="admin-log" style="max-height:220px;overflow:auto;background:var(--card2);
+        border:1px solid var(--line);border-radius:8px;padding:8px;font-size:10.5px;
+        white-space:pre-wrap;user-select:text;margin:0">${(d.log||[]).join('\\n') || '(sin salida todavia)'}</pre>
+      <button onclick="adminCopiarLog()" style="margin-top:6px;padding:6px 10px;
+        border-radius:6px;border:1px solid var(--line);background:var(--card);
+        color:var(--text);font-size:11px;cursor:pointer">Copiar log</button>`;
+    if(d.estado !== 'corriendo' && adminPolling){
+      clearInterval(adminPolling);
+      adminPolling = null;
+    }
+  }catch(e){
+    out.textContent = 'Error consultando estado: ' + e;
+  }
+}
+function adminCopiarLog(){
+  const el = document.getElementById('admin-log');
+  if(!el) return;
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(el.textContent).then(
+      ()=>alert('Log copiado'),
+      ()=>alert('No se pudo copiar solo, seleccionalo a mano'));
+  }else{
+    alert('Tu navegador no soporta copiar automatico, seleccionalo a mano');
   }
 }
 </script>
@@ -688,6 +728,29 @@ async def r_stats(request):
 
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
 
+ESTADO_ADMIN = {"tarea": None, "estado": "inactivo", "inicio": None,
+                "fin": None, "log": [], "error": None}
+_estado_lock = threading.Lock()
+_stdout_real = sys.stdout
+
+
+class _TeeLog:
+    """Escribe a la salida real (para que siga apareciendo en los logs
+    de Railway) y ademas guarda las lineas en ESTADO_ADMIN para poder
+    consultarlas desde el navegador."""
+    def write(self, s):
+        _stdout_real.write(s)
+        if s.strip():
+            with _estado_lock:
+                for linea in s.splitlines():
+                    if linea.strip():
+                        ESTADO_ADMIN["log"].append(linea)
+                ESTADO_ADMIN["log"] = ESTADO_ADMIN["log"][-300:]
+        return len(s)
+
+    def flush(self):
+        _stdout_real.flush()
+
 
 async def r_admin(request):
     token = request.query_params.get("token")
@@ -698,6 +761,11 @@ async def r_admin(request):
                       "para poder usar este endpoint."}, status_code=403)
     if token != ADMIN_TOKEN:
         return JSONResponse({"error": "no autorizado"}, status_code=403)
+    with _estado_lock:
+        if ESTADO_ADMIN["estado"] == "corriendo":
+            return JSONResponse(
+                {"error": f"ya hay una tarea corriendo ({ESTADO_ADMIN['tarea']}), "
+                          f"esperala a que termine"}, status_code=409)
 
     def hacer_todo():
         update_fixtures(dias=365, quiet=True)
@@ -717,10 +785,40 @@ async def r_admin(request):
         return JSONResponse(
             {"error": f"tarea desconocida. Usa una de: {list(tareas.keys())}"},
             status_code=400)
-    threading.Thread(target=fn, daemon=True).start()
-    return JSONResponse({"status": "corriendo en background, mira los logs "
-                                    "de Railway para ver el progreso",
-                         "tarea": tarea})
+
+    def correr():
+        with _estado_lock:
+            ESTADO_ADMIN.update({"tarea": tarea, "estado": "corriendo",
+                                 "inicio": datetime.now(timezone.utc).isoformat(),
+                                 "fin": None, "log": [], "error": None})
+        tee = _TeeLog()
+        try:
+            with contextlib.redirect_stdout(tee):
+                fn()
+            with _estado_lock:
+                ESTADO_ADMIN["estado"] = "listo"
+        except Exception as e:
+            with _estado_lock:
+                ESTADO_ADMIN["estado"] = "error"
+                ESTADO_ADMIN["error"] = str(e)
+                ESTADO_ADMIN["log"].append("ERROR: " + str(e))
+                ESTADO_ADMIN["log"].append(traceback.format_exc())
+        finally:
+            with _estado_lock:
+                ESTADO_ADMIN["fin"] = datetime.now(timezone.utc).isoformat()
+
+    threading.Thread(target=correr, daemon=True).start()
+    return JSONResponse({"status": "corriendo en background", "tarea": tarea})
+
+
+async def r_admin_estado(request):
+    token = request.query_params.get("token")
+    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
+        return JSONResponse({"error": "no autorizado"}, status_code=403)
+    with _estado_lock:
+        return JSONResponse(dict(ESTADO_ADMIN))
+
+
 
 
 from contextlib import asynccontextmanager
@@ -739,6 +837,7 @@ app = Starlette(
         Route("/api/proximos", r_proximos),
         Route("/api/stats", r_stats),
         Route("/admin/run", r_admin),
+        Route("/admin/estado", r_admin_estado),
     ],
     lifespan=lifespan,
 )
