@@ -673,13 +673,22 @@ cargar();
 <script>
 let adminPolling = null;
 async function adminRun(tarea){
-  const token = prompt('Clave de admin (ADMIN_TOKEN de Railway):');
-  if(!token) return;
+  let token = localStorage.getItem('cardradar_admin_token');
+  if(!token){
+    token = prompt('Clave de admin (ADMIN_TOKEN de Railway). Se guarda en este navegador, no la vuelvo a pedir:');
+    if(!token) return;
+    localStorage.setItem('cardradar_admin_token', token);
+  }
   const out = document.getElementById('admin-resultado');
   out.textContent = 'Enviando...';
   try{
     const r = await fetch(`/admin/run?tarea=${tarea}&token=${encodeURIComponent(token)}`);
     const data = await r.json();
+    if(r.status === 403){
+      localStorage.removeItem('cardradar_admin_token');
+      out.textContent = 'Clave incorrecta, se borro. Volve a tocar el boton para escribirla de nuevo.';
+      return;
+    }
     if(!r.ok){ out.textContent = 'Error: ' + data.error; return; }
     if(adminPolling) clearInterval(adminPolling);
     adminPoll(token);

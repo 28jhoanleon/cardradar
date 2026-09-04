@@ -331,23 +331,35 @@ def diagnosticar_nota_vieja():
         print("falta beautifulsoup4")
         return
     r = http().get("https://www.ligaprofesional.ar/categoria/arbitraje/", timeout=20)
+    print(f"status categoria: {r.status_code}, largo respuesta: {len(r.text)}")
     r.raise_for_status()
     urls = re.findall(
         r'https://www\.ligaprofesional\.ar/notas/arbitraje/[^\s"\'<>]+/', r.text)
     urls = list(dict.fromkeys(urls))
+    print(f"URLs de notas encontradas: {len(urls)}")
     url_vieja = next((u for u in urls if "autoridades-de-la-fecha" in u), None)
     if not url_vieja:
         print("no encontre ninguna nota vieja tipo 'autoridades-de-la-fecha'")
+        print("primeras URLs que SI encontro:", urls[:5])
         return
     print(f"Probando: {url_vieja}")
     r2 = http().get(url_vieja, timeout=20)
+    print(f"status nota: {r2.status_code}, largo respuesta cruda (HTML): {len(r2.text)}")
+    print(f"primeros 300 caracteres del HTML crudo: {r2.text[:300]!r}")
     r2.raise_for_status()
     soup = BeautifulSoup(r2.text, "html.parser")
     texto = soup.get_text("\n")
-    ini = texto.find("Designaciones arbitrales")
+    print(f"largo del texto TOTAL de la pagina (sin recortar): {len(texto)}")
+    pos_designaciones = texto.find("Designaciones arbitrales")
+    pos_autoridades = texto.find("Autoridades")
+    pos_ultimas = texto.find("Últimas noticias")
+    print(f"posicion de 'Designaciones arbitrales': {pos_designaciones}")
+    print(f"posicion de 'Autoridades': {pos_autoridades}")
+    print(f"posicion de 'Últimas noticias': {pos_ultimas}")
+    ini = pos_designaciones
     if ini == -1:
-        ini = texto.find("Autoridades")
-    fin = texto.find("Últimas noticias")
+        ini = pos_autoridades
+    fin = pos_ultimas
     if ini == -1:
         ini = 0
     if fin == -1:
