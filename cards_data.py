@@ -269,31 +269,57 @@ _PATRON_PARTIDO_LINEA = re.compile(
 _PATRON_ARBITRO_LINEA = re.compile(r"^[ÁA]rbitro:\s*(.+)$", re.IGNORECASE)
 
 
+_PATRON_FIXTURE_INLINE = re.compile(
+    r"(\d{1,2})[:.](\d{2})\s+(.+?)\s*[–—-]\s*(.+?)\s+[ÁA]rbitro:\s*(.+?)"
+    r"(?=\s+[ÁA]rbitro\b|\s+Cuarto\b|\s+VAR:|\s+AVAR:|\s+\d{1,2}[:.]\d{2}\s+\S|\s*$)",
+    re.IGNORECASE | re.DOTALL)
+
+
+_RUIDO_ZONA = re.compile(r"\(\s*(?:zona\s+[a-z]|interzonal)\s*\)", re.IGNORECASE)
+_RUIDO_CANAL = re.compile(r"-[^-]{2,30}-\s*$")
+
+
+def _limpiar_nombre_corto(s):
+    """Saca el ruido de '(Zona A)' / '(Interzonal)' y '-Canal-' que la
+    LPF agrega despues del nombre del equipo en las notas viejas, sin
+    tocar los casos donde el parentesis SI es parte del nombre del
+    equipo (ej. 'Estudiantes (Rio Cuarto)', 'Gimnasia (Mza.)')."""
+    s = _RUIDO_ZONA.sub("", s)
+    for _ in range(3):
+        nuevo = _RUIDO_CANAL.sub("", s).strip()
+        if nuevo == s:
+            break
+        s = nuevo
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def _parsear_bloque_arbitros(bloque, anio):
-    """Recorre el texto linea por linea llevando la fecha actual, y
-    devuelve (home_corto, away_corto, arbitro, fecha_iso) por cada
-    partido con arbitro asignado que encuentre."""
+    """Funciona tanto con el formato viejo de la LPF (todo el texto
+    corrido, sin saltos de linea, con la fecha pegada al primer
+    partido del dia) como con el nuevo (una linea por dato). En vez de
+    ir linea por linea, ubica TODAS las fechas y TODOS los partidos
+    por su posicion en el texto, y le asigna a cada partido la fecha
+    mas cercana que aparece antes que el."""
+    fechas = []
+    for m in _PATRON_FECHA.finditer(bloque):
+        dia = int(m.group(1))
+        mes = MESES.get(_normalizar(m.group(2)))
+        if mes:
+            fechas.append((m.start(), f"{anio}-{mes:02d}-{dia:02d}"))
+
     resultado = []
-    fecha_actual = None
-    pendiente = None
-    for linea in (l.strip() for l in bloque.split("\n") if l.strip()):
-        m_fecha = _PATRON_FECHA.search(linea)
-        if m_fecha:
-            dia = int(m_fecha.group(1))
-            mes = MESES.get(_normalizar(m_fecha.group(2)))
-            if mes:
-                fecha_actual = f"{anio}-{mes:02d}-{dia:02d}"
-            continue
-        m_partido = _PATRON_PARTIDO_LINEA.match(linea)
-        if m_partido:
-            pendiente = (m_partido.group(1).strip(), m_partido.group(2).strip(),
-                        fecha_actual)
-            continue
-        m_arb = _PATRON_ARBITRO_LINEA.match(linea)
-        if m_arb and pendiente:
-            home_corto, away_corto, fecha = pendiente
-            resultado.append((home_corto, away_corto, m_arb.group(1).strip(), fecha))
-            pendiente = None
+    for m in _PATRON_FIXTURE_INLINE.finditer(bloque):
+        pos = m.start()
+        fecha_actual = None
+        for fpos, f in fechas:
+            if fpos <= pos:
+                fecha_actual = f
+            else:
+                break
+        home_corto = _limpiar_nombre_corto(m.group(3).strip())
+        away_corto = _limpiar_nombre_corto(m.group(4).strip())
+        arbitro = m.group(5).strip().rstrip(".")
+        resultado.append((home_corto, away_corto, arbitro, fecha_actual))
     return resultado
 
 
