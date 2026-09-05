@@ -319,6 +319,7 @@ def loop_actualizacion():
             update_fixtures(dias=365, quiet=True)
             process_matches(limite=99999)
             actualizar_arbitros()
+            actualizar_historial_arbitros(max_notas=10)
             print("[actualizador] backfill inicial terminado.")
         except Exception as e:
             print(f"[actualizador] fallo el backfill inicial: {e}")
@@ -327,6 +328,7 @@ def loop_actualizacion():
             update_fixtures(dias=5, quiet=True)
             process_matches(limite=40)
             actualizar_arbitros()
+            actualizar_historial_arbitros(max_notas=10)
         except Exception as e:
             print(f"[actualizador] error: {e}")
         time.sleep(6 * 3600)
