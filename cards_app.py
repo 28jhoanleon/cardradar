@@ -60,6 +60,48 @@ def poisson_cdf(k, lam):
     return min(s, 1.0)
 
 
+def obtener_curva_calibracion(minimo_total=50, minimo_por_rango=15):
+    """Construye una curva empirica (probabilidad dicha -> probabilidad
+    real) a partir de lo ya evaluado. Devuelve None si todavia no hay
+    suficiente data para confiar en la correccion (mejor no ajustar
+    nada que ajustar con 3 datos sueltos)."""
+    with cx() as c:
+        filas = c.execute(
+            "SELECT probabilidad, acierto FROM predicciones "
+            "WHERE evaluado=1").fetchall()
+    if len(filas) < minimo_total:
+        return None
+    rangos = [(0, 50), (50, 60), (60, 70), (70, 80), (80, 90), (90, 101)]
+    puntos = []
+    for lo, hi in rangos:
+        sub = [f for f in filas if lo <= f["probabilidad"] < hi]
+        if len(sub) < minimo_por_rango:
+            continue
+        x = sum(s["probabilidad"] for s in sub) / len(sub)
+        y = sum(s["acierto"] for s in sub) / len(sub) * 100
+        puntos.append((x, y))
+    puntos.sort()
+    return puntos if len(puntos) >= 2 else None
+
+
+def calibrar_probabilidad(prob_cruda, curva):
+    """Aplica la curva empirica a un numero crudo del modelo, con
+    interpolacion lineal entre puntos conocidos. Si prob_cruda cae
+    fuera del rango que tenemos medido, usa el extremo mas cercano en
+    vez de extrapolar (mas seguro)."""
+    if not curva:
+        return prob_cruda
+    if prob_cruda <= curva[0][0]:
+        return curva[0][1]
+    if prob_cruda >= curva[-1][0]:
+        return curva[-1][1]
+    for (x0, y0), (x1, y1) in zip(curva, curva[1:]):
+        if x0 <= prob_cruda <= x1:
+            t = (prob_cruda - x0) / (x1 - x0) if x1 != x0 else 0
+            return round(y0 + t * (y1 - y0), 1)
+    return prob_cruda
+
+
 def liga_media():
     with cx() as c:
         r = c.execute("SELECT AVG(total_cards) FROM team_cards").fetchone()
@@ -205,6 +247,16 @@ def probas_equipo(team, rival=None, es_local=None, arbitro=None):
     }
 
 
+def aplicar_calibracion_dict(d, curva):
+    """Devuelve una copia de d con 'under' calibrado, sin tocar el
+    original (que se guarda crudo para poder seguir midiendo)."""
+    if not curva:
+        return d
+    d2 = dict(d)
+    d2["under"] = {k: calibrar_probabilidad(v, curva) for k, v in d["under"].items()}
+    return d2
+
+
 # ======================= PROXIMOS PARTIDOS ================================
 
 def proximos_partidos(dias=7):
@@ -267,27 +319,33 @@ def api_proximos():
     with cx() as c:
         arbitros_map = {(_normalizar(r["home"]), _normalizar(r["away"])): r["arbitro"]
                          for r in c.execute("SELECT home, away, arbitro FROM arbitros_proximos")}
+    curva = obtener_curva_calibracion()
     out = []
     for p in proximos_partidos():
         arbitro = arbitros_map.get((_normalizar(p["home"]), _normalizar(p["away"])))
-        home_est = probas_equipo(p["home"], rival=p["away"], es_local=True, arbitro=arbitro)
-        away_est = probas_equipo(p["away"], rival=p["home"], es_local=False, arbitro=arbitro)
-        home_est["id"] = p.get("home_id")
-        away_est["id"] = p.get("away_id")
-        lam_total = home_est["lambda"] + away_est["lambda"]
+        home_est_crudo = probas_equipo(p["home"], rival=p["away"], es_local=True, arbitro=arbitro)
+        away_est_crudo = probas_equipo(p["away"], rival=p["home"], es_local=False, arbitro=arbitro)
+        lam_total = home_est_crudo["lambda"] + away_est_crudo["lambda"]
         # Lineas mas altas para el total del partido, tiene sentido que
         # sea la suma de las de cada equipo.
         LINEAS_TOTAL = [6, 7, 8, 9, 10, 11]
-        combinado = {
+        combinado_crudo = {
             "lambda": round(lam_total, 2),
             "under": {str(x): round(poisson_cdf(x - 1, lam_total) * 100, 1)
                       for x in LINEAS_TOTAL},
         }
         try:
             guardar_todas_predicciones(p.get("match_id"), p["home"], p["away"],
-                                       p["fecha"], home_est, away_est, combinado)
+                                       p["fecha"], home_est_crudo, away_est_crudo,
+                                       combinado_crudo)
         except Exception as e:
             print(f"  [predicciones] no pude guardar: {e}")
+
+        home_est = aplicar_calibracion_dict(home_est_crudo, curva)
+        away_est = aplicar_calibracion_dict(away_est_crudo, curva)
+        combinado = aplicar_calibracion_dict(combinado_crudo, curva)
+        home_est["id"] = p.get("home_id")
+        away_est["id"] = p.get("away_id")
         out.append({**p, "home_est": home_est, "away_est": away_est,
                     "combinado": combinado, "arbitro": arbitro})
     return out
@@ -691,7 +749,10 @@ async function cargarRendimiento(){
         (d.pendientes ? ` (${d.pendientes} mas por jugarse)` : '') + `</summary>
       <div style="margin-top:8px;font-size:11px;line-height:1.5">
         Por cada rango, comparo lo que dije contra lo que paso de verdad.
-        Si "se cumplio" queda cerca de lo que dije, el modelo esta bien calibrado ahi.
+        Si "se cumplio" queda cerca de lo que dije, el modelo esta bien calibrado ahi.<br><br>
+        <b style="color:${d.calibracion_activa?'var(--em)':'var(--mut)'}">
+          ${d.calibracion_activa ? '&#9989; Auto-correccion ACTIVA' : '&#9203; Auto-correccion esperando mas datos (minimo 50 evaluados)'}
+        </b>: los porcentajes que ves arriba ya estan ${d.calibracion_activa ? '' : 'SIN '}ajustados con esto.
       </div>
       <div style="margin-top:6px">${filasCalib}</div>
     </details>`;
@@ -846,7 +907,8 @@ async def r_rendimiento(request):
         })
     return JSONResponse({"evaluadas": total, "aciertos": aciertos,
                          "porcentaje": pct_global, "pendientes": pendientes,
-                         "calibracion": calibracion})
+                         "calibracion": calibracion,
+                         "calibracion_activa": obtener_curva_calibracion() is not None})
 
 
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
