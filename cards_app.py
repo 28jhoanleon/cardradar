@@ -34,7 +34,8 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cards_data import (api, dig, LIGAS, cx, db_init, update_fixtures,
                          process_matches, _normalizar, actualizar_arbitros,
-                         actualizar_historial_arbitros, diagnosticar_nota_vieja)
+                         actualizar_historial_arbitros, diagnosticar_nota_vieja,
+                         evaluar_predicciones_pendientes)
 
 try:
     from starlette.applications import Starlette
@@ -236,6 +237,42 @@ def proximos_partidos(dias=7):
     return out
 
 
+def mejor_pick_partido(home_est, away_est, combinado):
+    """Replica la logica de 'Recomendado' del frontend, en Python, para
+    poder guardar una foto de la recomendacion en el momento y despues
+    medir si acerto o no. Prioriza el total del partido (linea 6-9 con
+    65%+ de confianza), si no hay ninguna cae a la mejor pata por
+    equipo (lineas 4/5/6)."""
+    for x in (6, 7, 8, 9):
+        val = combinado["under"].get(str(x))
+        if val is not None and val >= 65:
+            return {"tipo": "total", "equipo": "", "umbral": x, "probabilidad": val}
+    candidatas = []
+    for t in (home_est, away_est):
+        for x in ("5", "6", "4"):
+            if x in t["under"]:
+                candidatas.append((t["confiable"], t["under"][x], t["equipo"], int(x)))
+    if not candidatas:
+        return None
+    candidatas.sort(key=lambda c: (c[0], c[1]), reverse=True)
+    conf, prob, equipo, umbral = candidatas[0]
+    return {"tipo": "equipo", "equipo": equipo, "umbral": umbral, "probabilidad": prob}
+
+
+def guardar_prediccion(match_id, home, away, fecha, pick):
+    if not pick or not match_id:
+        return
+    with cx() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO predicciones "
+            "(match_id, tipo, equipo, texto, umbral, probabilidad, home, away, "
+            "fecha, guardado, evaluado) VALUES (?,?,?,?,?,?,?,?,?,?,0)",
+            (match_id, pick["tipo"], pick["equipo"],
+             f"{pick['equipo'] or 'Total del partido'} - Menos de {pick['umbral']}",
+             pick["umbral"], pick["probabilidad"], home, away, fecha,
+             datetime.now(timezone.utc).isoformat()))
+
+
 def api_proximos():
     with cx() as c:
         arbitros_map = {(_normalizar(r["home"]), _normalizar(r["away"])): r["arbitro"]
@@ -256,6 +293,11 @@ def api_proximos():
             "under": {str(x): round(poisson_cdf(x - 1, lam_total) * 100, 1)
                       for x in LINEAS_TOTAL},
         }
+        pick = mejor_pick_partido(home_est, away_est, combinado)
+        try:
+            guardar_prediccion(p.get("match_id"), p["home"], p["away"], p["fecha"], pick)
+        except Exception as e:
+            print(f"  [predicciones] no pude guardar: {e}")
         out.append({**p, "home_est": home_est, "away_est": away_est,
                     "combinado": combinado, "arbitro": arbitro})
     return out
@@ -377,6 +419,7 @@ h1{font-family:var(--f-body);font-size:22px;margin:0 0 4px;font-weight:700}
   font-family:var(--f-body);font-weight:700;font-size:13px;cursor:pointer">
   &#10024; Sugerime una combinada
 </button>
+<div id="rendimiento" style="margin-top:10px;font-size:11.5px;color:var(--mut)"></div>
 </div>
 <div id="app" class="loading">Cargando proximos partidos...</div>
 
@@ -633,7 +676,22 @@ async function cargar(){
     el.innerHTML = '<div class="empty">Error cargando: '+e+'</div>';
   }
 }
+async function cargarRendimiento(){
+  const el = document.getElementById('rendimiento');
+  try{
+    const r = await fetch('/api/rendimiento');
+    const d = await r.json();
+    if(!d.evaluadas){
+      el.textContent = 'Todavia no hay picks evaluados (se van sumando a medida que terminan los partidos).';
+      return;
+    }
+    el.innerHTML = `&#128202; Rendimiento historico: <b style="color:var(--text)">${d.porcentaje}%</b> `+
+      `de acierto en ${d.evaluadas} picks evaluados`+
+      (d.pendientes ? ` (${d.pendientes} mas esperando a que se jueguen)` : '');
+  }catch(e){}
+}
 cargar();
+cargarRendimiento();
 </script>
 <details style="margin-top:24px;color:var(--mut)">
   <summary style="cursor:pointer;font-size:12px">&#9881;&#65039; Admin (actualizar datos manualmente)</summary>
@@ -755,6 +813,20 @@ async def r_stats(request):
                          "partidos_con_arbitro_historico": n_arb})
 
 
+async def r_rendimiento(request):
+    with cx() as c:
+        fila = c.execute(
+            "SELECT COUNT(*) AS total, SUM(acierto) AS aciertos "
+            "FROM predicciones WHERE evaluado=1").fetchone()
+        pendientes = c.execute(
+            "SELECT COUNT(*) FROM predicciones WHERE evaluado=0").fetchone()[0]
+    total = fila["total"] or 0
+    aciertos = fila["aciertos"] or 0
+    pct = round(aciertos / total * 100, 1) if total else None
+    return JSONResponse({"evaluadas": total, "aciertos": aciertos,
+                         "porcentaje": pct, "pendientes": pendientes})
+
+
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
 
 ESTADO_ADMIN = {"tarea": None, "estado": "inactivo", "inicio": None,
@@ -866,6 +938,7 @@ app = Starlette(
         Route("/", home),
         Route("/api/proximos", r_proximos),
         Route("/api/stats", r_stats),
+        Route("/api/rendimiento", r_rendimiento),
         Route("/admin/run", r_admin),
         Route("/admin/estado", r_admin_estado),
     ],

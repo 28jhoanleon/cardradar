@@ -85,6 +85,11 @@ CREATE TABLE IF NOT EXISTS arbitros_proximos(
 CREATE TABLE IF NOT EXISTS arbitro_historial(
   match_id INTEGER PRIMARY KEY, arbitro TEXT, home TEXT, away TEXT,
   date TEXT, total_cards_partido REAL);
+CREATE TABLE IF NOT EXISTS predicciones(
+  match_id INTEGER, tipo TEXT, equipo TEXT, texto TEXT,
+  umbral INTEGER, probabilidad REAL, home TEXT, away TEXT,
+  fecha TEXT, guardado TEXT, evaluado INTEGER DEFAULT 0, acierto INTEGER,
+  PRIMARY KEY(match_id, tipo, equipo));
 """
 
 
@@ -279,6 +284,22 @@ _RUIDO_ZONA = re.compile(r"\(\s*(?:zona\s+[a-z]|interzonal)\s*\)", re.IGNORECASE
 _RUIDO_CANAL = re.compile(r"-[^-]{2,30}-\s*$")
 
 
+def _recortar_bloque_nota(texto):
+    """Recorta el texto de una nota de la LPF entre el inicio real del
+    contenido y el pie de pagina. Usa el marcador de inicio que
+    aparezca MAS TEMPRANO entre los candidatos (nunca uno que aparezca
+    despues del fin, evita el bug de bloque vacio por 'Designaciones
+    arbitrales' apareciendo tarde, en el pie, en notas viejas)."""
+    fin = texto.find("Últimas noticias")
+    if fin == -1:
+        fin = len(texto)
+    candidatos_ini = [texto.find("Designaciones arbitrales"),
+                      texto.find("Autoridades")]
+    candidatos_ini = [p for p in candidatos_ini if 0 <= p < fin]
+    ini = min(candidatos_ini) if candidatos_ini else 0
+    return texto[ini:fin]
+
+
 def _limpiar_nombre_corto(s):
     """Saca el ruido de '(Zona A)' / '(Interzonal)' y '-Canal-' que la
     LPF agrega despues del nombre del equipo en las notas viejas, sin
@@ -350,21 +371,10 @@ def diagnosticar_nota_vieja():
     soup = BeautifulSoup(r2.text, "html.parser")
     texto = soup.get_text("\n")
     print(f"largo del texto TOTAL de la pagina (sin recortar): {len(texto)}")
-    pos_designaciones = texto.find("Designaciones arbitrales")
-    pos_autoridades = texto.find("Autoridades")
-    pos_ultimas = texto.find("Últimas noticias")
-    print(f"posicion de 'Designaciones arbitrales': {pos_designaciones}")
-    print(f"posicion de 'Autoridades': {pos_autoridades}")
-    print(f"posicion de 'Últimas noticias': {pos_ultimas}")
-    ini = pos_designaciones
-    if ini == -1:
-        ini = pos_autoridades
-    fin = pos_ultimas
-    if ini == -1:
-        ini = 0
-    if fin == -1:
-        fin = len(texto)
-    bloque = texto[ini:fin]
+    print(f"posicion de 'Designaciones arbitrales': {texto.find('Designaciones arbitrales')}")
+    print(f"posicion de 'Autoridades': {texto.find('Autoridades')}")
+    print(f"posicion de 'Últimas noticias': {texto.find('Últimas noticias')}")
+    bloque = _recortar_bloque_nota(texto)
     print(f"\nlargo del bloque: {len(bloque)} caracteres")
     print("\n===== primeros 1500 caracteres (repr, para ver saltos de linea reales) =====")
     print(repr(bloque[:1500]))
@@ -414,15 +424,7 @@ def historial_arbitros_lpf(max_notas=8):
             continue
         soup = BeautifulSoup(r2.text, "html.parser")
         texto = soup.get_text("\n")
-        ini = texto.find("Designaciones arbitrales")
-        if ini == -1:
-            ini = texto.find("Autoridades")
-        fin = texto.find("Últimas noticias")
-        if ini == -1:
-            ini = 0
-        if fin == -1:
-            fin = len(texto)
-        bloque = texto[ini:fin]
+        bloque = _recortar_bloque_nota(texto)
         entradas = _parsear_bloque_arbitros(bloque, anio)
         todos.extend(entradas)
         print(f"  [historial arbitros] {url.rstrip('/').split('/')[-1][:40]}: "
@@ -498,13 +500,7 @@ def obtener_arbitros_lpf():
 
     soup = BeautifulSoup(r2.text, "html.parser")
     texto = soup.get_text("\n")
-    ini = texto.find("Designaciones arbitrales")
-    fin = texto.find("Últimas noticias")
-    if ini == -1:
-        ini = 0
-    if fin == -1:
-        fin = len(texto)
-    bloque = texto[ini:fin]
+    bloque = _recortar_bloque_nota(texto)
 
     patron = re.compile(
         r"\d{1,2}[:.]\d{2}\s+(.+?)\s*[–—-]\s*(.+?)\s*\([^)]*\)"
@@ -708,6 +704,42 @@ def update_fixtures(dias=180, quiet=False):
     return nuevos
 
 
+def evaluar_predicciones_pendientes():
+    """Revisa las predicciones guardadas que todavia no se evaluaron, y
+    si el partido correspondiente ya tiene tarjetas cargadas, calcula
+    si acerto o no."""
+    with cx() as c:
+        pendientes = c.execute(
+            "SELECT * FROM predicciones WHERE evaluado=0").fetchall()
+    if not pendientes:
+        return 0
+    evaluadas = 0
+    with cx() as c:
+        for p in pendientes:
+            if p["tipo"] == "total":
+                fila = c.execute(
+                    "SELECT SUM(total_cards) AS total FROM team_cards "
+                    "WHERE match_id=?", (p["match_id"],)).fetchone()
+                if not fila or fila["total"] is None:
+                    continue
+                valor_real = fila["total"]
+            else:
+                fila = c.execute(
+                    "SELECT total_cards FROM team_cards WHERE match_id=? "
+                    "AND team=?", (p["match_id"], p["equipo"])).fetchone()
+                if not fila:
+                    continue
+                valor_real = fila["total_cards"]
+            acierto = 1 if valor_real < p["umbral"] else 0
+            c.execute(
+                "UPDATE predicciones SET evaluado=1, acierto=? "
+                "WHERE match_id=? AND tipo=? AND equipo=?",
+                (acierto, p["match_id"], p["tipo"], p["equipo"]))
+            evaluadas += 1
+    print(f"Predicciones evaluadas: {evaluadas}/{len(pendientes)}")
+    return evaluadas
+
+
 def process_matches(limite=600):
     db_init()
     with cx() as c:
@@ -757,6 +789,10 @@ def process_matches(limite=600):
     except KeyboardInterrupt:
         print("\n  Cortado. Lo procesado quedo guardado.")
     print(f"\nOK {ok} | errores {err}")
+    try:
+        evaluar_predicciones_pendientes()
+    except Exception as e:
+        print(f"  [predicciones] fallo evaluando: {e}")
 
 
 def main():
