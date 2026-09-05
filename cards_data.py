@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS predicciones(
   match_id INTEGER, tipo TEXT, equipo TEXT, texto TEXT,
   umbral INTEGER, probabilidad REAL, home TEXT, away TEXT,
   fecha TEXT, guardado TEXT, evaluado INTEGER DEFAULT 0, acierto INTEGER,
-  PRIMARY KEY(match_id, tipo, equipo));
+  PRIMARY KEY(match_id, tipo, equipo, umbral));
 """
 
 
@@ -104,6 +104,14 @@ def cx():
 def db_init():
     with cx() as c:
         c.executescript(SCHEMA)
+        cols = c.execute("PRAGMA table_info(predicciones)").fetchall()
+        pk_cols = sorted((row for row in cols if row[5] > 0), key=lambda row: row[5])
+        pk_names = [row[1] for row in pk_cols]
+        if pk_names and pk_names != ["match_id", "tipo", "equipo", "umbral"]:
+            print("[migracion] recreando tabla 'predicciones' con la clave "
+                  "primaria correcta (la anterior perdia lineas)")
+            c.execute("DROP TABLE predicciones")
+            c.executescript(SCHEMA)
 
 
 def cfg_get(k, d=None):

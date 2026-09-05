@@ -237,40 +237,30 @@ def proximos_partidos(dias=7):
     return out
 
 
-def mejor_pick_partido(home_est, away_est, combinado):
-    """Replica la logica de 'Recomendado' del frontend, en Python, para
-    poder guardar una foto de la recomendacion en el momento y despues
-    medir si acerto o no. Prioriza el total del partido (linea 6-9 con
-    65%+ de confianza), si no hay ninguna cae a la mejor pata por
-    equipo (lineas 4/5/6)."""
-    for x in (6, 7, 8, 9):
-        val = combinado["under"].get(str(x))
-        if val is not None and val >= 65:
-            return {"tipo": "total", "equipo": "", "umbral": x, "probabilidad": val}
-    candidatas = []
-    for t in (home_est, away_est):
-        for x in ("5", "6", "4"):
-            if x in t["under"]:
-                candidatas.append((t["confiable"], t["under"][x], t["equipo"], int(x)))
-    if not candidatas:
-        return None
-    candidatas.sort(key=lambda c: (c[0], c[1]), reverse=True)
-    conf, prob, equipo, umbral = candidatas[0]
-    return {"tipo": "equipo", "equipo": equipo, "umbral": umbral, "probabilidad": prob}
-
-
-def guardar_prediccion(match_id, home, away, fecha, pick):
-    if not pick or not match_id:
+def guardar_todas_predicciones(match_id, home, away, fecha, home_est, away_est, combinado):
+    """Guarda una foto de TODOS los porcentajes que se le mostraron al
+    usuario para este partido (no solo la 'mejor pata'), para poder
+    medir despues si el modelo esta bien calibrado: cuando dice 90%,
+    se cumple ~90% de las veces? INSERT OR IGNORE asi la foto queda
+    fija la primera vez que se ve el partido, no se pisa despues."""
+    if not match_id:
         return
+    ahora = datetime.now(timezone.utc).isoformat()
+    filas = []
+    for t in (home_est, away_est):
+        for x_str, prob in t["under"].items():
+            filas.append((match_id, "equipo", t["equipo"],
+                          f"{t['equipo']} - Menos de {x_str}", int(x_str), prob,
+                          home, away, fecha, ahora))
+    for x_str, prob in combinado["under"].items():
+        filas.append((match_id, "total", "",
+                      f"Total del partido - Menos de {x_str}", int(x_str), prob,
+                      home, away, fecha, ahora))
     with cx() as c:
-        c.execute(
+        c.executemany(
             "INSERT OR IGNORE INTO predicciones "
             "(match_id, tipo, equipo, texto, umbral, probabilidad, home, away, "
-            "fecha, guardado, evaluado) VALUES (?,?,?,?,?,?,?,?,?,?,0)",
-            (match_id, pick["tipo"], pick["equipo"],
-             f"{pick['equipo'] or 'Total del partido'} - Menos de {pick['umbral']}",
-             pick["umbral"], pick["probabilidad"], home, away, fecha,
-             datetime.now(timezone.utc).isoformat()))
+            "fecha, guardado, evaluado) VALUES (?,?,?,?,?,?,?,?,?,?,0)", filas)
 
 
 def api_proximos():
@@ -293,9 +283,9 @@ def api_proximos():
             "under": {str(x): round(poisson_cdf(x - 1, lam_total) * 100, 1)
                       for x in LINEAS_TOTAL},
         }
-        pick = mejor_pick_partido(home_est, away_est, combinado)
         try:
-            guardar_prediccion(p.get("match_id"), p["home"], p["away"], p["fecha"], pick)
+            guardar_todas_predicciones(p.get("match_id"), p["home"], p["away"],
+                                       p["fecha"], home_est, away_est, combinado)
         except Exception as e:
             print(f"  [predicciones] no pude guardar: {e}")
         out.append({**p, "home_est": home_est, "away_est": away_est,
@@ -684,12 +674,27 @@ async function cargarRendimiento(){
     const r = await fetch('/api/rendimiento');
     const d = await r.json();
     if(!d.evaluadas){
-      el.textContent = 'Todavia no hay picks evaluados (se van sumando a medida que terminan los partidos).';
+      el.textContent = 'Todavia no hay porcentajes evaluados (se van sumando a medida que terminan los partidos).';
       return;
     }
-    el.innerHTML = `&#128202; Rendimiento historico: <b style="color:var(--text)">${d.porcentaje}%</b> `+
-      `de acierto en ${d.evaluadas} picks evaluados`+
-      (d.pendientes ? ` (${d.pendientes} mas esperando a que se jueguen)` : '');
+    const filasCalib = d.calibracion.map(c=>{
+      const dif = c.cumplido_real - c.predicho_prom;
+      const color = Math.abs(dif) <= 8 ? 'hi' : (Math.abs(dif) <= 15 ? 'mid' : 'lo');
+      return `<div class="total-row">
+        <span>Dije ${c.rango} (prom. ${c.predicho_prom}%, n=${c.n})</span>
+        <span class="pct ${color}">se cumplio ${c.cumplido_real}%</span>
+      </div>`;
+    }).join('');
+    el.innerHTML = `<details>
+      <summary style="cursor:pointer">&#128202; Calibracion del modelo: `+
+        `<b style="color:var(--text)">${d.evaluadas}</b> porcentajes evaluados`+
+        (d.pendientes ? ` (${d.pendientes} mas por jugarse)` : '') + `</summary>
+      <div style="margin-top:8px;font-size:11px;line-height:1.5">
+        Por cada rango, comparo lo que dije contra lo que paso de verdad.
+        Si "se cumplio" queda cerca de lo que dije, el modelo esta bien calibrado ahi.
+      </div>
+      <div style="margin-top:6px">${filasCalib}</div>
+    </details>`;
   }catch(e){}
 }
 cargar();
@@ -817,16 +822,31 @@ async def r_stats(request):
 
 async def r_rendimiento(request):
     with cx() as c:
-        fila = c.execute(
-            "SELECT COUNT(*) AS total, SUM(acierto) AS aciertos "
-            "FROM predicciones WHERE evaluado=1").fetchone()
+        filas = c.execute(
+            "SELECT probabilidad, acierto FROM predicciones "
+            "WHERE evaluado=1").fetchall()
         pendientes = c.execute(
             "SELECT COUNT(*) FROM predicciones WHERE evaluado=0").fetchone()[0]
-    total = fila["total"] or 0
-    aciertos = fila["aciertos"] or 0
-    pct = round(aciertos / total * 100, 1) if total else None
+    total = len(filas)
+    if not total:
+        return JSONResponse({"evaluadas": 0, "pendientes": pendientes, "calibracion": []})
+    aciertos = sum(f["acierto"] for f in filas)
+    pct_global = round(aciertos / total * 100, 1)
+    rangos = [(90, 101), (80, 90), (70, 80), (60, 70), (50, 60), (0, 50)]
+    calibracion = []
+    for lo, hi in rangos:
+        sub = [f for f in filas if lo <= f["probabilidad"] < hi]
+        if not sub:
+            continue
+        calibracion.append({
+            "rango": f"{lo}-{min(hi, 100)}%",
+            "predicho_prom": round(sum(s["probabilidad"] for s in sub) / len(sub), 1),
+            "cumplido_real": round(sum(s["acierto"] for s in sub) / len(sub) * 100, 1),
+            "n": len(sub),
+        })
     return JSONResponse({"evaluadas": total, "aciertos": aciertos,
-                         "porcentaje": pct, "pendientes": pendientes})
+                         "porcentaje": pct_global, "pendientes": pendientes,
+                         "calibracion": calibracion})
 
 
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
